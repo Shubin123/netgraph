@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Live Network Map</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0d1117; color: #e6edf3; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; height: 100vh; }
+
+#overlay {
+  position: fixed; inset: 0; background: #0d1117;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; z-index: 100;
+}
+#overlay h1 { font-size: 24px; color: #58a6ff; }
+#btnPicker {
+  padding: 14px 32px; background: #238636; color: #fff; border: none;
+  border-radius: 6px; font-size: 16px; cursor: pointer; font-weight: bold;
+  transition: background 0.2s;
+}
+#btnPicker:hover { background: #2ea043; }
+
+#hud { position: fixed; top: 14px; left: 16px; z-index: 10; display: none; }
+#stats { font-size: 13px; color: #8b949e; background: rgba(13, 17, 23, 0.85); padding: 12px; border-radius: 8px; border: 1px solid #30363d; box-shadow: 0 4px 12px rgba(0,0,0,0.5);}
+
+#timeline {
+  position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+  width: 80%; max-width: 800px; background: rgba(13, 17, 23, 0.9);
+  padding: 15px 20px; border-radius: 12px; border: 1px solid #30363d;
+  display: none; align-items: center; gap: 15px; z-index: 10;
+}
+#timeSlider { flex-grow: 1; cursor: pointer; accent-color: #58a6ff; }
+#timeStatus { font-size: 12px; font-weight: bold; color: #3fb950; min-width: 50px; text-align: right; }
+
+#legend {
+  position: fixed; top: 14px; right: 16px; font-size: 12px; color: #8b949e;
+  background: rgba(13, 17, 23, 0.85); padding: 12px; border-radius: 8px; border: 1px solid #30363d; display: none; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+}
+.legend-item { margin-bottom: 6px; cursor: pointer; transition: opacity 0.2s; user-select: none; }
+.legend-item:hover { color: #e6edf3; }
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
+
+.link { stroke: #30363d; stroke-width: 1.5; opacity: 0.4; }
+.node circle { stroke-width: 1.5; cursor: grab; }
+.node text { font-size: 10px; fill: #8b949e; pointer-events: none; text-shadow: 0 1px 3px #000; }
+</style>
+</head>
+<body>
+
+<div id="overlay">
+  <h1>⬡ Live Network Map</h1>
+  <button id="btnPicker">📂 Open Live stream.ndjson</button>
+</div>
+
+<div id="hud">
+  <div id="stats">
+    Nodes: <b id="nc" style="color:#e6edf3">0</b> | Edges: <b id="ec" style="color:#e6edf3">0</b> | Packets: <b id="pc" style="color:#e6edf3">0</b>
+  </div>
+</div>
+
+<div id="legend"></div>
+
+<div id="timeline">
+  <span style="font-size: 12px; color: #8b949e;">Time</span>
+  <input type="range" id="timeSlider" min="0" max="0" value="0">
+  <div id="timeStatus">LIVE</div>
+</div>
+
+<svg id="svg"></svg>
+
+<script>
+// --- Core State ---
+const nodes = new Map();
+const edges = new Map();
+let bytesRead = 0;
+let globalPacketIndex = 0;
+let fileHandle = null;
+let isLive = true;
+let activeFilter = null; // Stores the clicked protocol
+
+// --- Dynamic Protocol Colors & Legend ---
+const knownProtos = new Set();
+const colorScale = d3.scaleOrdinal(d3.schemeTableau10); 
+
+function updateLegend() {
+  const legend = document.getElementById('legend');
+  legend.innerHTML = '';
+  
+  // "ALL" Filter Reset Button
+  const allDiv = document.createElement('div');
+  allDiv.className = 'legend-item';
+  allDiv.style.opacity = activeFilter === null ? '1' : '0.4';
+  allDiv.style.color = activeFilter === null ? '#58a6ff' : '#8b949e';
+  allDiv.innerHTML = `<b>⬡ ALL PROTOCOLS</b>`;
+  allDiv.onclick = () => { activeFilter = null; updateLegend(); updateGraph(); };
+  legend.appendChild(allDiv);
+
+  // Dynamic Protocol Buttons
+  knownProtos.forEach(p => {
+    const div = document.createElement('div');
+    div.className = 'legend-item';
+    div.style.opacity = (activeFilter === null || activeFilter === p) ? '1' : '0.3';
+    div.innerHTML = `<span class="dot" style="background:${colorScale(p)}"></span>${p}`;
+    div.onclick = () => { activeFilter = p; updateLegend(); updateGraph(); };
+    legend.appendChild(div);
+  });
+}
+
+// Node scaling logic
+const getRadius = d => Math.min(45, 6 + Math.sqrt(d.currentCount) * 2.5);
+
+// High-speed bisector for time-travel
+const bisectHistory = d3.bisector(d => d.index).right;
+
+// --- D3 Setup ---
+const svg = d3.select('#svg');
+const W = () => window.innerWidth, H = () => window.innerHeight;
+svg.attr('width', W()).attr('height', H());
+const g = svg.append('g');
+const gLinks = g.append('g'), gNodes = g.append('g');
+
+svg.call(d3.zoom().scaleExtent([0.1, 4]).on('zoom', e => g.attr('transform', e.transform)));
+
+const sim = d3.forceSimulation()
+  .force('link', d3.forceLink().id(d => d.id).distance(100))
+  .force('charge', d3.forceManyBody().strength(-200))
+  .force('center', d3.forceCenter(W()/2, H()/2))
+  .on('tick', () => {
+    gLinks.selectAll('line').attr('x1', d => d.source.x).attr('y1', d => d.source.y).attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+    gNodes.selectAll('.node').attr('transform', d => `translate(${d.x},${d.y})`);
+  });
+
+function updateGraph() {
+  const currentLimit = parseInt(document.getElementById('timeSlider').value);
+  
+  // Sync HUD packet count to time slider
+  document.getElementById('pc').textContent = currentLimit;
+
+  const activeNodes = [];
+  const activeNodeIds = new Set(); // For fast edge filtering
+
+  nodes.forEach(n => {
+    // 1. Find how many packets hit this node up to current limit
+    const splitIndex = bisectHistory(n.history, currentLimit);
+    n.currentCount = splitIndex;
+    
+    if (n.currentCount > 0) {
+      // 2. The node's "color" becomes the most recent protocol it handled before the limit
+      n.displayProto = n.history[splitIndex - 1].proto;
+
+      // 3. Apply Legend Filtering
+      if (!activeFilter) {
+        activeNodes.push(n);
+        activeNodeIds.add(n.id);
+      } else {
+        // If filtered, check if THIS node handled the active protocol during the requested timeframe
+        let matched = false;
+        for (let i = splitIndex - 1; i >= 0; i--) {
+          if (n.history[i].proto === activeFilter) { matched = true; break; }
+        }
+        if (matched) {
+          activeNodes.push(n);
+          activeNodeIds.add(n.id);
+        }
+      }
+    }
+  });
+
+  // Filter edges: Must be created before the time limit AND both attached nodes must survive the legend filter
+  const activeEdges = [...edges.values()].filter(e => {
+    if (e.firstSeen > currentLimit) return false;
+    if (activeFilter && (!activeNodeIds.has(e.source.id || e.source) || !activeNodeIds.has(e.target.id || e.target))) return false;
+    return true;
+  });
+  
+  const link = gLinks.selectAll('line').data(activeEdges, d => d.id);
+  link.enter().append('line').attr('class', 'link');
+  link.exit().remove();
+
+  const node = gNodes.selectAll('.node').data(activeNodes, d => d.id);
+  
+  const ne = node.enter().append('g').attr('class', 'node')
+    .call(d3.drag()
+      .on('start', (e, d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; })
+      .on('end', (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
+
+  // Node Circle Initialization
+  ne.append('circle')
+    .attr('r', d => getRadius(d) + 15)
+    .attr('fill', '#e6edf3') 
+    .transition().duration(1000).ease(d3.easeCubicOut)
+    .attr('r', getRadius)
+    .attr('fill', d => colorScale(d.displayProto) + '44')
+    .attr('stroke', d => colorScale(d.displayProto));
+
+  ne.append('text').attr('dy', 22).attr('text-anchor', 'middle').text(d => d.id);
+  
+  // Update Existing Nodes smoothly
+  node.select('circle')
+    .transition().duration(300)
+    .attr('r', getRadius)
+    .attr('fill', d => colorScale(d.displayProto) + '44')
+    .attr('stroke', d => colorScale(d.displayProto));
+
+  node.exit().remove();
+
+  sim.nodes(activeNodes);
+  sim.force('link').links(activeEdges);
+  
+  // Tiny kick so existing nodes shift slightly to accommodate scaling nodes
+  if (sim.alpha() < 0.05) sim.alpha(0.05).restart();
+
+  document.getElementById('nc').textContent = activeNodes.length;
+  document.getElementById('ec').textContent = activeEdges.length;
+}
+
+// --- Time Slider Logic ---
+const timeSlider = document.getElementById('timeSlider');
+const timeStatus = document.getElementById('timeStatus');
+
+timeSlider.addEventListener('input', () => {
+  isLive = (parseInt(timeSlider.value) === globalPacketIndex);
+  timeStatus.textContent = isLive ? 'LIVE' : 'PAUSED';
+  timeStatus.style.color = isLive ? '#3fb950' : '#d29922';
+  updateGraph();
+});
+
+// --- File Streaming Engine ---
+async function streamLoop() {
+  if (!fileHandle) return;
+
+  try {
+    const file = await fileHandle.getFile();
+    
+    if (file.size > bytesRead) {
+      const blob = file.slice(bytesRead);
+      const text = await blob.text();
+      bytesRead = file.size;
+
+      let structuralChange = false;
+      let legendChanged = false;
+      
+      text.split('\n').forEach(line => {
+        if (!line.trim()) return;
+        try {
+          const data = JSON.parse(line);
+          globalPacketIndex++;
+          
+          const src = data.src, dst = data.dst, proto = data.proto;
+
+          if (!knownProtos.has(proto)) {
+            knownProtos.add(proto);
+            legendChanged = true;
+          }
+
+          // We now push OBJECTS into history: { index: int, proto: string }
+          if (!nodes.has(src)) { 
+            const peer = nodes.get(dst);
+            nodes.set(src, { id: src, history: [{index: globalPacketIndex, proto: proto}], x: peer ? peer.x : W()/2, y: peer ? peer.y : H()/2 }); 
+            structuralChange = true; 
+          } else {
+            nodes.get(src).history.push({index: globalPacketIndex, proto: proto});
+            structuralChange = true; 
+          }
+
+          if (!nodes.has(dst)) { 
+            const peer = nodes.get(src);
+            nodes.set(dst, { id: dst, history: [{index: globalPacketIndex, proto: proto}], x: peer ? peer.x : W()/2, y: peer ? peer.y : H()/2 }); 
+            structuralChange = true; 
+          } else {
+            nodes.get(dst).history.push({index: globalPacketIndex, proto: proto});
+            structuralChange = true;
+          }
+          
+          const eid = `${src}-${dst}`;
+          if (!edges.has(eid)) { 
+            edges.set(eid, {id: eid, source: src, target: dst, firstSeen: globalPacketIndex}); 
+            structuralChange = true; 
+          }
+        } catch(e) {}
+      });
+
+      timeSlider.max = globalPacketIndex;
+      if (legendChanged) updateLegend();
+
+      if (isLive) {
+        timeSlider.value = globalPacketIndex;
+        if (structuralChange) updateGraph();
+      }
+    }
+  } catch (err) {}
+
+  setTimeout(streamLoop, 800);
+}
+
+document.getElementById('btnPicker').onclick = async () => {
+  try {
+    [fileHandle] = await window.showOpenFilePicker();
+    document.getElementById('overlay').style.display = 'none';
+    document.getElementById('hud').style.display = 'block';
+    document.getElementById('legend').style.display = 'block';
+    document.getElementById('timeline').style.display = 'flex';
+    streamLoop();
+  } catch (err) {}
+};
+</script>
+</body>
+</html>
