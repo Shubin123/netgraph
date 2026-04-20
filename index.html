@@ -12,13 +12,20 @@ body { background: #0d1117; color: #e6edf3; font-family: 'Segoe UI', system-ui, 
   position: fixed; inset: 0; background: #0d1117;
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; z-index: 100;
 }
-#overlay h1 { font-size: 24px; color: #58a6ff; }
-#btnPicker {
-  padding: 14px 32px; background: #238636; color: #fff; border: none;
+#overlay h1 { font-size: 24px; color: #58a6ff; margin-bottom: 10px; }
+.btn-container { display: flex; gap: 15px; }
+
+#btnPicker, #btnStatic {
+  padding: 14px 32px; color: #fff; border: none;
   border-radius: 6px; font-size: 16px; cursor: pointer; font-weight: bold;
   transition: background 0.2s;
 }
+#btnPicker { background: #238636; }
 #btnPicker:hover { background: #2ea043; }
+#btnStatic { background: #1f6feb; }
+#btnStatic:hover { background: #388bfd; }
+
+.hint-text { color: #8b949e; font-size: 13px; max-width: 450px; text-align: center; margin-top: 10px; line-height: 1.5; }
 
 #hud { position: fixed; top: 14px; left: 16px; z-index: 10; display: none; }
 #stats { font-size: 13px; color: #8b949e; background: rgba(13, 17, 23, 0.85); padding: 12px; border-radius: 8px; border: 1px solid #30363d; box-shadow: 0 4px 12px rgba(0,0,0,0.5);}
@@ -30,7 +37,7 @@ body { background: #0d1117; color: #e6edf3; font-family: 'Segoe UI', system-ui, 
   display: none; align-items: center; gap: 15px; z-index: 10;
 }
 #timeSlider { flex-grow: 1; cursor: pointer; accent-color: #58a6ff; }
-#timeStatus { font-size: 12px; font-weight: bold; color: #3fb950; min-width: 50px; text-align: right; }
+#timeStatus { font-size: 12px; font-weight: bold; color: #3fb950; min-width: 60px; text-align: right; }
 
 #legend {
   position: fixed; top: 14px; right: 16px; font-size: 12px; color: #8b949e;
@@ -48,8 +55,17 @@ body { background: #0d1117; color: #e6edf3; font-family: 'Segoe UI', system-ui, 
 <body>
 
 <div id="overlay">
-  <h1>⬡ Live Network Map</h1>
-  <button id="btnPicker">📂 Open Live stream.ndjson</button>
+  <h1>⬡ Network Map Engine</h1>
+  <div class="btn-container">
+    <button id="btnPicker">📂 Open Live stream.ndjson</button>
+    <button id="btnStatic">📊 Review Wireshark PCAP (CSV)</button>
+  </div>
+  <p class="hint-text">
+    <b>To review PCAP/CAP captures:</b><br>
+    Open your file in Wireshark, navigate to <br>
+    <span style="color:#e6edf3;">File &gt; Export Packet Dissections &gt; As CSV...</span><br>
+    and load the resulting file here.
+  </p>
 </div>
 
 <div id="hud">
@@ -76,7 +92,7 @@ let bytesRead = 0;
 let globalPacketIndex = 0;
 let fileHandle = null;
 let isLive = true;
-let activeFilter = null; // Stores the clicked protocol
+let activeFilter = null; 
 
 // --- Dynamic Protocol Colors & Legend ---
 const knownProtos = new Set();
@@ -86,7 +102,6 @@ function updateLegend() {
   const legend = document.getElementById('legend');
   legend.innerHTML = '';
   
-  // "ALL" Filter Reset Button
   const allDiv = document.createElement('div');
   allDiv.className = 'legend-item';
   allDiv.style.opacity = activeFilter === null ? '1' : '0.4';
@@ -95,7 +110,6 @@ function updateLegend() {
   allDiv.onclick = () => { activeFilter = null; updateLegend(); updateGraph(); };
   legend.appendChild(allDiv);
 
-  // Dynamic Protocol Buttons
   knownProtos.forEach(p => {
     const div = document.createElement('div');
     div.className = 'legend-item';
@@ -108,8 +122,6 @@ function updateLegend() {
 
 // Node scaling logic
 const getRadius = d => Math.min(45, 6 + Math.sqrt(d.currentCount) * 2.5);
-
-// High-speed bisector for time-travel
 const bisectHistory = d3.bisector(d => d.index).right;
 
 // --- D3 Setup ---
@@ -132,28 +144,22 @@ const sim = d3.forceSimulation()
 
 function updateGraph() {
   const currentLimit = parseInt(document.getElementById('timeSlider').value);
-  
-  // Sync HUD packet count to time slider
   document.getElementById('pc').textContent = currentLimit;
 
   const activeNodes = [];
-  const activeNodeIds = new Set(); // For fast edge filtering
+  const activeNodeIds = new Set();
 
   nodes.forEach(n => {
-    // 1. Find how many packets hit this node up to current limit
     const splitIndex = bisectHistory(n.history, currentLimit);
     n.currentCount = splitIndex;
     
     if (n.currentCount > 0) {
-      // 2. The node's "color" becomes the most recent protocol it handled before the limit
       n.displayProto = n.history[splitIndex - 1].proto;
 
-      // 3. Apply Legend Filtering
       if (!activeFilter) {
         activeNodes.push(n);
         activeNodeIds.add(n.id);
       } else {
-        // If filtered, check if THIS node handled the active protocol during the requested timeframe
         let matched = false;
         for (let i = splitIndex - 1; i >= 0; i--) {
           if (n.history[i].proto === activeFilter) { matched = true; break; }
@@ -166,7 +172,6 @@ function updateGraph() {
     }
   });
 
-  // Filter edges: Must be created before the time limit AND both attached nodes must survive the legend filter
   const activeEdges = [...edges.values()].filter(e => {
     if (e.firstSeen > currentLimit) return false;
     if (activeFilter && (!activeNodeIds.has(e.source.id || e.source) || !activeNodeIds.has(e.target.id || e.target))) return false;
@@ -185,7 +190,6 @@ function updateGraph() {
       .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; })
       .on('end', (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
 
-  // Node Circle Initialization
   ne.append('circle')
     .attr('r', d => getRadius(d) + 15)
     .attr('fill', '#e6edf3') 
@@ -196,7 +200,6 @@ function updateGraph() {
 
   ne.append('text').attr('dy', 22).attr('text-anchor', 'middle').text(d => d.id);
   
-  // Update Existing Nodes smoothly
   node.select('circle')
     .transition().duration(300)
     .attr('r', getRadius)
@@ -208,11 +211,45 @@ function updateGraph() {
   sim.nodes(activeNodes);
   sim.force('link').links(activeEdges);
   
-  // Tiny kick so existing nodes shift slightly to accommodate scaling nodes
   if (sim.alpha() < 0.05) sim.alpha(0.05).restart();
 
   document.getElementById('nc').textContent = activeNodes.length;
   document.getElementById('ec').textContent = activeEdges.length;
+}
+
+// --- Shared Data Ingestion Logic ---
+function processPacketData(src, dst, proto) {
+  let structuralChange = false;
+  let legendChanged = false;
+
+  globalPacketIndex++;
+
+  if (!knownProtos.has(proto)) {
+    knownProtos.add(proto);
+    legendChanged = true;
+  }
+
+  // Handle Nodes
+  [src, dst].forEach(targetId => {
+    if (!nodes.has(targetId)) { 
+      const peerId = targetId === src ? dst : src;
+      const peer = nodes.get(peerId);
+      nodes.set(targetId, { id: targetId, history: [{index: globalPacketIndex, proto: proto}], x: peer ? peer.x : W()/2, y: peer ? peer.y : H()/2 }); 
+      structuralChange = true; 
+    } else {
+      nodes.get(targetId).history.push({index: globalPacketIndex, proto: proto});
+      structuralChange = true; 
+    }
+  });
+  
+  // Handle Edges
+  const eid = `${src}-${dst}`;
+  if (!edges.has(eid)) { 
+    edges.set(eid, {id: eid, source: src, target: dst, firstSeen: globalPacketIndex}); 
+    structuralChange = true; 
+  }
+
+  return { structuralChange, legendChanged };
 }
 
 // --- Time Slider Logic ---
@@ -226,7 +263,14 @@ timeSlider.addEventListener('input', () => {
   updateGraph();
 });
 
-// --- File Streaming Engine ---
+function initUI() {
+  document.getElementById('overlay').style.display = 'none';
+  document.getElementById('hud').style.display = 'block';
+  document.getElementById('legend').style.display = 'block';
+  document.getElementById('timeline').style.display = 'flex';
+}
+
+// --- File Streaming Engine (Live .ndjson) ---
 async function streamLoop() {
   if (!fileHandle) return;
 
@@ -245,39 +289,9 @@ async function streamLoop() {
         if (!line.trim()) return;
         try {
           const data = JSON.parse(line);
-          globalPacketIndex++;
-          
-          const src = data.src, dst = data.dst, proto = data.proto;
-
-          if (!knownProtos.has(proto)) {
-            knownProtos.add(proto);
-            legendChanged = true;
-          }
-
-          // We now push OBJECTS into history: { index: int, proto: string }
-          if (!nodes.has(src)) { 
-            const peer = nodes.get(dst);
-            nodes.set(src, { id: src, history: [{index: globalPacketIndex, proto: proto}], x: peer ? peer.x : W()/2, y: peer ? peer.y : H()/2 }); 
-            structuralChange = true; 
-          } else {
-            nodes.get(src).history.push({index: globalPacketIndex, proto: proto});
-            structuralChange = true; 
-          }
-
-          if (!nodes.has(dst)) { 
-            const peer = nodes.get(src);
-            nodes.set(dst, { id: dst, history: [{index: globalPacketIndex, proto: proto}], x: peer ? peer.x : W()/2, y: peer ? peer.y : H()/2 }); 
-            structuralChange = true; 
-          } else {
-            nodes.get(dst).history.push({index: globalPacketIndex, proto: proto});
-            structuralChange = true;
-          }
-          
-          const eid = `${src}-${dst}`;
-          if (!edges.has(eid)) { 
-            edges.set(eid, {id: eid, source: src, target: dst, firstSeen: globalPacketIndex}); 
-            structuralChange = true; 
-          }
+          const changes = processPacketData(data.src, data.dst, data.proto);
+          if (changes.structuralChange) structuralChange = true;
+          if (changes.legendChanged) legendChanged = true;
         } catch(e) {}
       });
 
@@ -294,14 +308,77 @@ async function streamLoop() {
   setTimeout(streamLoop, 800);
 }
 
+// --- Static File Parsing (Wireshark .csv) ---
+async function processStaticCSV() {
+  try {
+    const file = await fileHandle.getFile();
+    const text = await file.text();
+    const lines = text.split('\n');
+    
+    if (lines.length === 0) return;
+
+    // Detect Wireshark Headers
+    const headers = lines[0].replace(/"/g, '').split(',');
+    const srcIdx = headers.findIndex(h => h.toLowerCase() === 'source');
+    const dstIdx = headers.findIndex(h => h.toLowerCase() === 'destination');
+    const protoIdx = headers.findIndex(h => h.toLowerCase() === 'protocol');
+
+    if (srcIdx === -1 || dstIdx === -1) {
+      alert("Invalid Wireshark CSV format. Missing Source/Destination columns.");
+      return;
+    }
+
+    let structuralChange = false;
+    let legendChanged = false;
+
+    // Fast CSV Parsing
+    for (let i = 1; i < lines.length; i++) {
+      if (!lines[i].trim()) continue;
+      
+      // Regex handles commas inside quote marks properly
+      const cols = lines[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(s => s.replace(/"/g, '').trim());
+      
+      if (cols.length > Math.max(srcIdx, dstIdx)) {
+        const src = cols[srcIdx], dst = cols[dstIdx], proto = cols[protoIdx] || 'UNKNOWN';
+        if (src && dst) {
+           const changes = processPacketData(src, dst, proto);
+           if (changes.structuralChange) structuralChange = true;
+           if (changes.legendChanged) legendChanged = true;
+        }
+      }
+    }
+
+    // Configure UI for Static Playback
+    isLive = false;
+    timeSlider.max = globalPacketIndex;
+    timeSlider.value = globalPacketIndex; 
+    timeStatus.textContent = 'STATIC';
+    timeStatus.style.color = '#58a6ff';
+
+    if (legendChanged) updateLegend();
+    updateGraph();
+
+  } catch (err) {
+    console.error("Failed to parse CSV", err);
+  }
+}
+
+// --- Event Listeners ---
 document.getElementById('btnPicker').onclick = async () => {
   try {
     [fileHandle] = await window.showOpenFilePicker();
-    document.getElementById('overlay').style.display = 'none';
-    document.getElementById('hud').style.display = 'block';
-    document.getElementById('legend').style.display = 'block';
-    document.getElementById('timeline').style.display = 'flex';
+    initUI();
     streamLoop();
+  } catch (err) {}
+};
+
+document.getElementById('btnStatic').onclick = async () => {
+  try {
+    [fileHandle] = await window.showOpenFilePicker({
+      types: [{ description: 'CSV Files', accept: {'text/csv': ['.csv']} }]
+    });
+    initUI();
+    processStaticCSV();
   } catch (err) {}
 };
 </script>
