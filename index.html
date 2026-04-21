@@ -13,26 +13,38 @@ body { background: #0d1117; color: #e6edf3; font-family: 'Segoe UI', system-ui, 
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; z-index: 100;
 }
 #overlay h1 { font-size: 24px; color: #58a6ff; margin-bottom: 10px; }
-.btn-container { display: flex; gap: 15px; }
+.btn-container { display: flex; flex-wrap: wrap; justify-content: center; gap: 15px; max-width: 800px; }
 
-#btnPicker, #btnStatic {
+button {
   padding: 14px 32px; color: #fff; border: none;
   border-radius: 6px; font-size: 16px; cursor: pointer; font-weight: bold;
-  transition: background 0.2s;
+  transition: background 0.2s, transform 0.1s;
 }
+button:active { transform: scale(0.98); }
 #btnPicker { background: #238636; }
 #btnPicker:hover { background: #2ea043; }
 #btnStatic { background: #1f6feb; }
 #btnStatic:hover { background: #388bfd; }
+#btnPcap { background: #8957e5; }
+#btnPcap:hover { background: #9d6cfa; }
 
-.hint-text { color: #8b949e; font-size: 13px; max-width: 450px; text-align: center; margin-top: 10px; line-height: 1.5; }
+.hint-text { color: #8b949e; font-size: 13px; max-width: 500px; text-align: center; margin-top: 10px; line-height: 1.5; }
 
 #hud { position: fixed; top: 14px; left: 16px; z-index: 10; display: none; }
-#stats { font-size: 13px; color: #8b949e; background: rgba(13, 17, 23, 0.85); padding: 12px; border-radius: 8px; border: 1px solid #30363d; box-shadow: 0 4px 12px rgba(0,0,0,0.5);}
+#stats { font-size: 13px; color: #8b949e; background: rgba(13,17,23,0.85); padding: 12px; border-radius: 8px; border: 1px solid #30363d; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+
+#progress-bar-wrap {
+  position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+  background: rgba(13,17,23,0.95); border: 1px solid #30363d; border-radius: 10px;
+  padding: 24px 32px; z-index: 200; display: none; min-width: 280px; text-align: center;
+}
+#progress-label { font-size: 13px; color: #8b949e; margin-bottom: 10px; }
+#progress-bar { width: 100%; height: 6px; background: #30363d; border-radius: 3px; overflow: hidden; }
+#progress-fill { height: 100%; background: #8957e5; width: 0%; transition: width 0.1s; border-radius: 3px; }
 
 #timeline {
   position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
-  width: 80%; max-width: 800px; background: rgba(13, 17, 23, 0.9);
+  width: 80%; max-width: 800px; background: rgba(13,17,23,0.9);
   padding: 15px 20px; border-radius: 12px; border: 1px solid #30363d;
   display: none; align-items: center; gap: 15px; z-index: 10;
 }
@@ -41,7 +53,8 @@ body { background: #0d1117; color: #e6edf3; font-family: 'Segoe UI', system-ui, 
 
 #legend {
   position: fixed; top: 14px; right: 16px; font-size: 12px; color: #8b949e;
-  background: rgba(13, 17, 23, 0.85); padding: 12px; border-radius: 8px; border: 1px solid #30363d; display: none; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+  background: rgba(13,17,23,0.85); padding: 12px; border-radius: 8px; border: 1px solid #30363d; display: none; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+  max-height: 90vh; overflow-y: auto;
 }
 .legend-item { margin-bottom: 6px; cursor: pointer; transition: opacity 0.2s; user-select: none; }
 .legend-item:hover { color: #e6edf3; }
@@ -55,29 +68,33 @@ body { background: #0d1117; color: #e6edf3; font-family: 'Segoe UI', system-ui, 
 <body>
 
 <div id="overlay">
-  <h1>⬡ Network Map Engine</h1>
+  <h1>&#x2B21; Network Map Engine</h1>
   <div class="btn-container">
-    <button id="btnPicker">📂 Open Live stream.ndjson</button>
-    <button id="btnStatic">📊 Review Wireshark PCAP (CSV)</button>
+    <button id="btnPicker">&#x1F4C2; Open Live stream.ndjson</button>
+    <button id="btnPcap">&#x1F988; Parse PCAP File</button>
+    <button id="btnStatic">&#x1F4CA; Review Wireshark (CSV)</button>
   </div>
   <p class="hint-text">
-    <b>To review PCAP/CAP captures:</b><br>
-    Open your file in Wireshark, navigate to <br>
-    <span style="color:#e6edf3;">File &gt; Export Packet Dissections &gt; As CSV...</span><br>
-    and load the resulting file here.
+    Supports <b>.pcap / .cap</b> (native binary parsing with VLAN support) and structured <b>.csv / .ndjson</b> formats.<br>
+    <i>Note: Ethernet link layer assumed. PCAPNG format is not supported.</i>
   </p>
 </div>
 
 <div id="hud">
   <div id="stats">
-    Nodes: <b id="nc" style="color:#e6edf3">0</b> | Edges: <b id="ec" style="color:#e6edf3">0</b> | Packets: <b id="pc" style="color:#e6edf3">0</b>
+    Nodes: <b id="nc" style="color:#e6edf3">0</b> &nbsp;|&nbsp; Edges: <b id="ec" style="color:#e6edf3">0</b> &nbsp;|&nbsp; Packets: <b id="pc" style="color:#e6edf3">0</b>
   </div>
+</div>
+
+<div id="progress-bar-wrap">
+  <div id="progress-label">Parsing PCAP&hellip;</div>
+  <div id="progress-bar"><div id="progress-fill"></div></div>
 </div>
 
 <div id="legend"></div>
 
 <div id="timeline">
-  <span style="font-size: 12px; color: #8b949e;">Time</span>
+  <span style="font-size:12px;color:#8b949e;">Time</span>
   <input type="range" id="timeSlider" min="0" max="0" value="0">
   <div id="timeStatus">LIVE</div>
 </div>
@@ -85,28 +102,28 @@ body { background: #0d1117; color: #e6edf3; font-family: 'Segoe UI', system-ui, 
 <svg id="svg"></svg>
 
 <script>
-// --- Core State ---
+// ─── Core State ──────────────────────────────────────────────────────────────
 const nodes = new Map();
 const edges = new Map();
 let bytesRead = 0;
 let globalPacketIndex = 0;
 let fileHandle = null;
 let isLive = true;
-let activeFilter = null; 
+let activeFilter = null;
 
-// --- Dynamic Protocol Colors & Legend ---
+// ─── Protocol Colors & Legend ─────────────────────────────────────────────────
 const knownProtos = new Set();
-const colorScale = d3.scaleOrdinal(d3.schemeTableau10); 
+const colorScale = d3.scaleOrdinal(d3.schemeTableau10);
 
 function updateLegend() {
   const legend = document.getElementById('legend');
   legend.innerHTML = '';
-  
+
   const allDiv = document.createElement('div');
   allDiv.className = 'legend-item';
   allDiv.style.opacity = activeFilter === null ? '1' : '0.4';
   allDiv.style.color = activeFilter === null ? '#58a6ff' : '#8b949e';
-  allDiv.innerHTML = `<b>⬡ ALL PROTOCOLS</b>`;
+  allDiv.innerHTML = '<b>&#x2B21; ALL PROTOCOLS</b>';
   allDiv.onclick = () => { activeFilter = null; updateLegend(); updateGraph(); };
   legend.appendChild(allDiv);
 
@@ -120,11 +137,10 @@ function updateLegend() {
   });
 }
 
-// Node scaling logic
+// ─── D3 Setup ─────────────────────────────────────────────────────────────────
 const getRadius = d => Math.min(45, 6 + Math.sqrt(d.currentCount) * 2.5);
 const bisectHistory = d3.bisector(d => d.index).right;
 
-// --- D3 Setup ---
 const svg = d3.select('#svg');
 const W = () => window.innerWidth, H = () => window.innerHeight;
 svg.attr('width', W()).attr('height', H());
@@ -138,10 +154,13 @@ const sim = d3.forceSimulation()
   .force('charge', d3.forceManyBody().strength(-200))
   .force('center', d3.forceCenter(W()/2, H()/2))
   .on('tick', () => {
-    gLinks.selectAll('line').attr('x1', d => d.source.x).attr('y1', d => d.source.y).attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+    gLinks.selectAll('line')
+      .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+      .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
     gNodes.selectAll('.node').attr('transform', d => `translate(${d.x},${d.y})`);
   });
 
+// ─── Graph Update ─────────────────────────────────────────────────────────────
 function updateGraph() {
   const currentLimit = parseInt(document.getElementById('timeSlider').value);
   document.getElementById('pc').textContent = currentLimit;
@@ -152,21 +171,19 @@ function updateGraph() {
   nodes.forEach(n => {
     const splitIndex = bisectHistory(n.history, currentLimit);
     n.currentCount = splitIndex;
-    
-    if (n.currentCount > 0) {
-      n.displayProto = n.history[splitIndex - 1].proto;
+    if (n.currentCount === 0) return;
 
-      if (!activeFilter) {
-        activeNodes.push(n);
-        activeNodeIds.add(n.id);
-      } else {
-        let matched = false;
-        for (let i = splitIndex - 1; i >= 0; i--) {
-          if (n.history[i].proto === activeFilter) { matched = true; break; }
-        }
-        if (matched) {
+    n.displayProto = n.history[splitIndex - 1].proto;
+
+    if (!activeFilter) {
+      activeNodes.push(n);
+      activeNodeIds.add(n.id);
+    } else {
+      for (let i = 0; i < splitIndex; i++) {
+        if (n.history[i].proto === activeFilter) {
           activeNodes.push(n);
           activeNodeIds.add(n.id);
+          break;
         }
       }
     }
@@ -174,16 +191,18 @@ function updateGraph() {
 
   const activeEdges = [...edges.values()].filter(e => {
     if (e.firstSeen > currentLimit) return false;
-    if (activeFilter && (!activeNodeIds.has(e.source.id || e.source) || !activeNodeIds.has(e.target.id || e.target))) return false;
+    const srcId = e.source.id !== undefined ? e.source.id : e.source;
+    const dstId = e.target.id !== undefined ? e.target.id : e.target;
+    if (!activeNodeIds.has(srcId) || !activeNodeIds.has(dstId)) return false;
+    if (activeFilter && e.proto !== activeFilter) return false;
     return true;
   });
-  
+
   const link = gLinks.selectAll('line').data(activeEdges, d => d.id);
   link.enter().append('line').attr('class', 'link');
   link.exit().remove();
 
   const node = gNodes.selectAll('.node').data(activeNodes, d => d.id);
-  
   const ne = node.enter().append('g').attr('class', 'node')
     .call(d3.drag()
       .on('start', (e, d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
@@ -191,15 +210,12 @@ function updateGraph() {
       .on('end', (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
 
   ne.append('circle')
-    .attr('r', d => getRadius(d) + 15)
-    .attr('fill', '#e6edf3') 
-    .transition().duration(1000).ease(d3.easeCubicOut)
-    .attr('r', getRadius)
+    .attr('r', d => getRadius(d))
     .attr('fill', d => colorScale(d.displayProto) + '44')
     .attr('stroke', d => colorScale(d.displayProto));
 
   ne.append('text').attr('dy', 22).attr('text-anchor', 'middle').text(d => d.id);
-  
+
   node.select('circle')
     .transition().duration(300)
     .attr('r', getRadius)
@@ -210,49 +226,42 @@ function updateGraph() {
 
   sim.nodes(activeNodes);
   sim.force('link').links(activeEdges);
-  
   if (sim.alpha() < 0.05) sim.alpha(0.05).restart();
 
   document.getElementById('nc').textContent = activeNodes.length;
   document.getElementById('ec').textContent = activeEdges.length;
 }
 
-// --- Shared Data Ingestion Logic ---
+// ─── Shared Ingestion ─────────────────────────────────────────────────────────
 function processPacketData(src, dst, proto) {
+  if (!src || !dst) return { structuralChange: false, legendChanged: false };
   let structuralChange = false;
   let legendChanged = false;
-
   globalPacketIndex++;
 
-  if (!knownProtos.has(proto)) {
-    knownProtos.add(proto);
-    legendChanged = true;
-  }
+  if (!knownProtos.has(proto)) { knownProtos.add(proto); legendChanged = true; }
 
-  // Handle Nodes
-  [src, dst].forEach(targetId => {
-    if (!nodes.has(targetId)) { 
-      const peerId = targetId === src ? dst : src;
-      const peer = nodes.get(peerId);
-      nodes.set(targetId, { id: targetId, history: [{index: globalPacketIndex, proto: proto}], x: peer ? peer.x : W()/2, y: peer ? peer.y : H()/2 }); 
-      structuralChange = true; 
+  [src, dst].forEach(id => {
+    if (!nodes.has(id)) {
+      const peer = nodes.get(id === src ? dst : src);
+      nodes.set(id, { id, history: [{ index: globalPacketIndex, proto }], x: peer ? peer.x : W()/2, y: peer ? peer.y : H()/2 });
+      structuralChange = true;
     } else {
-      nodes.get(targetId).history.push({index: globalPacketIndex, proto: proto});
-      structuralChange = true; 
+      nodes.get(id).history.push({ index: globalPacketIndex, proto });
+      structuralChange = true;
     }
   });
-  
-  // Handle Edges
+
   const eid = `${src}-${dst}`;
-  if (!edges.has(eid)) { 
-    edges.set(eid, {id: eid, source: src, target: dst, firstSeen: globalPacketIndex}); 
-    structuralChange = true; 
+  if (!edges.has(eid)) {
+    edges.set(eid, { id: eid, source: src, target: dst, firstSeen: globalPacketIndex, proto });
+    structuralChange = true;
   }
 
   return { structuralChange, legendChanged };
 }
 
-// --- Time Slider Logic ---
+// ─── Timeline ────────────────────────────────────────────────────────────────
 const timeSlider = document.getElementById('timeSlider');
 const timeStatus = document.getElementById('timeStatus');
 
@@ -270,117 +279,347 @@ function initUI() {
   document.getElementById('timeline').style.display = 'flex';
 }
 
-// --- File Streaming Engine (Live .ndjson) ---
+// ─── Live NDJSON Streaming ────────────────────────────────────────────────────
 async function streamLoop() {
   if (!fileHandle) return;
-
   try {
     const file = await fileHandle.getFile();
-    
     if (file.size > bytesRead) {
-      const blob = file.slice(bytesRead);
-      const text = await blob.text();
+      const text = await file.slice(bytesRead).text();
       bytesRead = file.size;
-
-      let structuralChange = false;
-      let legendChanged = false;
-      
+      let structural = false, legend = false;
       text.split('\n').forEach(line => {
         if (!line.trim()) return;
         try {
-          const data = JSON.parse(line);
-          const changes = processPacketData(data.src, data.dst, data.proto);
-          if (changes.structuralChange) structuralChange = true;
-          if (changes.legendChanged) legendChanged = true;
+          const d = JSON.parse(line);
+          const c = processPacketData(d.src, d.dst, d.proto);
+          if (c.structuralChange) structural = true;
+          if (c.legendChanged) legend = true;
         } catch(e) {}
       });
-
       timeSlider.max = globalPacketIndex;
-      if (legendChanged) updateLegend();
-
-      if (isLive) {
-        timeSlider.value = globalPacketIndex;
-        if (structuralChange) updateGraph();
-      }
+      if (legend) updateLegend();
+      if (isLive) { timeSlider.value = globalPacketIndex; if (structural) updateGraph(); }
     }
-  } catch (err) {}
-
+  } catch(err) {}
   setTimeout(streamLoop, 800);
 }
 
-// --- Static File Parsing (Wireshark .csv) ---
+// ─── IPv6 Address Formatter ──────────────────────────────────────────────────
+function formatIPv6(dv, offset) {
+  const groups = [];
+  for (let i = 0; i < 16; i += 2) {
+    groups.push(dv.getUint16(offset + i, false)); 
+  }
+
+  let bestStart = -1, bestLen = 0, curStart = -1, curLen = 0;
+  for (let i = 0; i < 8; i++) {
+    if (groups[i] === 0) {
+      if (curStart === -1) { curStart = i; curLen = 1; }
+      else curLen++;
+      if (curLen > bestLen) { bestStart = curStart; bestLen = curLen; }
+    } else {
+      curStart = -1; curLen = 0;
+    }
+  }
+
+  if (bestLen < 2) {
+    return groups.map(g => g.toString(16)).join(':');
+  }
+  const left  = groups.slice(0, bestStart).map(g => g.toString(16)).join(':');
+  const right = groups.slice(bestStart + bestLen).map(g => g.toString(16)).join(':');
+  return `${left}::${right}`;
+}
+
+// ─── PCAP Parser ─────────────────────────────────────────────────────────────
+const PROTO_MAP = { 1:'ICMP', 2:'IGMP', 6:'TCP', 17:'UDP', 41:'IPv6', 47:'GRE', 50:'ESP', 51:'AH', 58:'ICMPv6', 89:'OSPF', 112:'VRRP', 132:'SCTP' };
+
+const PORT_MAP = {
+  20: 'FTP', 21: 'FTP', 22: 'SSH', 23: 'Telnet', 25: 'SMTP', 
+  53: 'DNS', 67: 'DHCP', 68: 'DHCP', 80: 'HTTP', 110: 'POP3', 
+  123: 'NTP', 137: 'NetBIOS', 138: 'NetBIOS', 139: 'NetBIOS', 
+  143: 'IMAP', 161: 'SNMP', 162: 'SNMP', 389: 'LDAP', 443: 'HTTPS', 
+  445: 'SMB', 514: 'Syslog', 636: 'LDAPS', 1433: 'MSSQL', 
+  3306: 'MySQL', 3389: 'RDP', 5353: 'mDNS', 5432: 'PostgreSQL'
+};
+function setProgress(pct, label) {
+  const wrap = document.getElementById('progress-bar-wrap');
+  wrap.style.display = 'block';
+  document.getElementById('progress-label').textContent = label || 'Parsing PCAP\u2026';
+  document.getElementById('progress-fill').style.width = pct + '%';
+  if (pct >= 100) setTimeout(() => { wrap.style.display = 'none'; }, 400);
+}
+
+// ─── MAC Address Formatter ───────────────────────────────────────────────────
+function formatMAC(dv, offset) {
+  return Array.from({length: 6}, (_, i) => dv.getUint8(offset + i).toString(16).padStart(2, '0')).join(':');
+}
+
+async function processStaticPCAP() {
+  try {
+    const file = await fileHandle.getFile();
+    const arrayBuffer = await file.arrayBuffer();
+    const dv = new DataView(arrayBuffer);
+    const total = arrayBuffer.byteLength;
+
+    if (total < 24) throw new Error("File too small to be a PCAP");
+
+    const magic = dv.getUint32(0, true);
+    let le;
+    if (magic === 0xa1b2c3d4 || magic === 0xa1b23c4d) le = true;
+    else if (magic === 0xd4c3b2a1 || magic === 0x4d3cb2a1) le = false;
+    else { alert('Invalid PCAP file: unknown magic number.'); return; }
+
+    const linkType = dv.getUint32(20, le);
+    
+    let offset = 24; 
+    let structural = false, legend = false;
+    let packetCount = 0;
+    const CHUNK = 2500; 
+
+    setProgress(0, 'Starting PCAP Parse\u2026');
+
+    while (offset < total) {
+      let processedInChunk = 0;
+
+      while (offset < total && processedInChunk < CHUNK) {
+        if (offset + 16 > total) break;
+
+        const inclLen = dv.getUint32(offset + 8, le);
+        const pktStart = offset + 16;
+        offset = pktStart + inclLen; 
+        processedInChunk++;
+        packetCount++;
+
+        if (offset > total || inclLen === 0) continue;
+
+        let etherType = 0;
+        let ipStart = 0;
+        let ethOffset = pktStart;
+        let srcMac = '', dstMac = '';
+
+        // --- ENCAPSULATION UNWRAPPING ---
+        if (linkType === 1) { 
+          if (inclLen < 14) continue;
+          dstMac = formatMAC(dv, ethOffset);
+          srcMac = formatMAC(dv, ethOffset + 6);
+          etherType = dv.getUint16(ethOffset + 12, false);
+          ipStart = ethOffset + 14;
+
+          if (dv.getUint8(pktStart) === 0x45 && inclLen >= 20) {
+            const ipLen = dv.getUint16(pktStart + 2, false);
+            if (ipLen <= inclLen && ipLen >= inclLen - 14) {
+               etherType = 0x0800; 
+               ipStart = pktStart;
+            }
+          }
+
+          let vlanStrips = 0;
+          while ((etherType === 0x8100 || etherType === 0x88A8 || etherType === 0x9100) && vlanStrips < 3) {
+            if (ipStart + 4 > total) break;
+            etherType = dv.getUint16(ipStart + 2, false);
+            ipStart += 4;
+            vlanStrips++;
+          }
+
+          if (etherType === 0x8864 && ipStart + 8 <= total) {
+            const pppProto = dv.getUint16(ipStart + 6, false);
+            if (pppProto === 0x0021) etherType = 0x0800; 
+            else if (pppProto === 0x0057) etherType = 0x86DD; 
+            ipStart += 8;
+          }
+
+          if (etherType <= 1500 && ipStart + 8 <= total) {
+            const dsap = dv.getUint8(ipStart);
+            const ssap = dv.getUint8(ipStart + 1);
+            if (dsap === 0xAA && ssap === 0xAA) {
+              etherType = dv.getUint16(ipStart + 6, false);
+              ipStart += 8;
+            }
+          }
+        } 
+        else if (linkType === 113) { 
+          if (inclLen < 16) continue;
+          etherType = dv.getUint16(ethOffset + 14, false);
+          ipStart = ethOffset + 16;
+          srcMac = 'SLL-Source'; dstMac = 'SLL-Dest';
+        } 
+        else if (linkType === 101 || linkType === 12 || linkType === 228) { 
+          const ver = dv.getUint8(pktStart) >> 4;
+          etherType = ver === 6 ? 0x86DD : 0x0800;
+          ipStart = pktStart;
+        } 
+        else if (linkType === 0) { 
+          if (inclLen < 4) continue;
+          const ver = dv.getUint8(pktStart + 4) >> 4;
+          etherType = ver === 6 ? 0x86DD : 0x0800;
+          ipStart = pktStart + 4;
+        } 
+        else { continue; }
+
+        let src = '', dst = '', proto = '';
+
+        // --- PROTOCOL EXTRACTION & PORT RESOLUTION ---
+        if (etherType === 0x0800) { // IPv4
+          if (ipStart + 20 > total) continue;
+          const ihl = (dv.getUint8(ipStart) & 0x0F) * 4;
+          if (ihl < 20 || ipStart + ihl > total) continue;
+          const protoNum = dv.getUint8(ipStart + 9);
+          
+          src = `${dv.getUint8(ipStart+12)}.${dv.getUint8(ipStart+13)}.${dv.getUint8(ipStart+14)}.${dv.getUint8(ipStart+15)}`;
+          dst = `${dv.getUint8(ipStart+16)}.${dv.getUint8(ipStart+17)}.${dv.getUint8(ipStart+18)}.${dv.getUint8(ipStart+19)}`;
+
+          // Read TCP/UDP Ports if applicable
+          let transportStart = ipStart + ihl;
+          if ((protoNum === 6 || protoNum === 17) && transportStart + 4 <= total) {
+            const srcPort = dv.getUint16(transportStart, false);
+            const dstPort = dv.getUint16(transportStart + 2, false);
+            // Check dictionary using either port (client to server OR server to client)
+            proto = PORT_MAP[srcPort] || PORT_MAP[dstPort] || (protoNum === 6 ? 'TCP' : 'UDP');
+          } else {
+            proto = PROTO_MAP[protoNum] || `IPv4-${protoNum}`;
+          }
+        } 
+        else if (etherType === 0x86DD) { // IPv6
+          if (ipStart + 40 > total) continue;
+          const nextHeader = dv.getUint8(ipStart + 6);
+          
+          src = formatIPv6(dv, ipStart + 8);
+          dst = formatIPv6(dv, ipStart + 24);
+
+          // Read TCP/UDP Ports (Assuming no IPv6 extension headers for performance/simplicity)
+          let transportStart = ipStart + 40;
+          if ((nextHeader === 6 || nextHeader === 17) && transportStart + 4 <= total) {
+            const srcPort = dv.getUint16(transportStart, false);
+            const dstPort = dv.getUint16(transportStart + 2, false);
+            proto = PORT_MAP[srcPort] || PORT_MAP[dstPort] || (nextHeader === 6 ? 'TCP' : 'UDP');
+          } else {
+            proto = PROTO_MAP[nextHeader] || `IPv6-${nextHeader}`;
+          }
+        } 
+        else if (etherType === 0x0806) { // ARP
+          proto = 'ARP';
+          if (ipStart + 28 <= total) {
+            const hlen = dv.getUint8(ipStart + 4); 
+            const plen = dv.getUint8(ipStart + 5); 
+            if (plen === 4 && hlen === 6 && ipStart + 8 + hlen*2 + plen*2 <= total) {
+              const senderIPOff = ipStart + 8 + hlen;
+              const targetIPOff = senderIPOff + plen + hlen;
+              src = `${dv.getUint8(senderIPOff)}.${dv.getUint8(senderIPOff+1)}.${dv.getUint8(senderIPOff+2)}.${dv.getUint8(senderIPOff+3)}`;
+              dst = `${dv.getUint8(targetIPOff)}.${dv.getUint8(targetIPOff+1)}.${dv.getUint8(targetIPOff+2)}.${dv.getUint8(targetIPOff+3)}`;
+            }
+          }
+        } 
+        else {
+          // --- FALLBACK TO MAC ---
+          if (srcMac && dstMac && srcMac !== 'SLL-Source') {
+            proto = etherType <= 1500 ? '802.3/LLC' : `Eth-0x${etherType.toString(16).padStart(4, '0')}`;
+            src = srcMac;
+            dst = dstMac;
+          }
+        }
+
+        if (src && dst) {
+          const c = processPacketData(src, dst, proto);
+          if (c.structuralChange) structural = true;
+          if (c.legendChanged) legend = true;
+        }
+      }
+
+      if (offset < total) {
+        const pct = Math.min(99, Math.round((offset / total) * 100));
+        setProgress(pct, `Parsing PCAP\u2026 ${packetCount.toLocaleString()} packets`);
+        await new Promise(r => setTimeout(r, 0)); 
+      }
+    }
+
+    setProgress(100);
+    isLive = false;
+    timeSlider.max = globalPacketIndex;
+    timeSlider.value = globalPacketIndex;
+    timeStatus.textContent = 'PCAP';
+    timeStatus.style.color = '#8957e5';
+    
+    if (legend) updateLegend();
+    updateGraph();
+
+  } catch (err) {
+    document.getElementById('progress-bar-wrap').style.display = 'none';
+    alert('Failed to parse PCAP: ' + err.message);
+    console.error(err);
+  }
+}
+
+// ─── Wireshark CSV ────────────────────────────────────────────────────────────
 async function processStaticCSV() {
   try {
     const file = await fileHandle.getFile();
     const text = await file.text();
     const lines = text.split('\n');
-    
-    if (lines.length === 0) return;
+    if (!lines.length) return;
 
-    // Detect Wireshark Headers
     const headers = lines[0].replace(/"/g, '').split(',');
-    const srcIdx = headers.findIndex(h => h.toLowerCase() === 'source');
-    const dstIdx = headers.findIndex(h => h.toLowerCase() === 'destination');
-    const protoIdx = headers.findIndex(h => h.toLowerCase() === 'protocol');
+    const srcIdx   = headers.findIndex(h => h.trim().toLowerCase() === 'source');
+    const dstIdx   = headers.findIndex(h => h.trim().toLowerCase() === 'destination');
+    const protoIdx = headers.findIndex(h => h.trim().toLowerCase() === 'protocol');
 
     if (srcIdx === -1 || dstIdx === -1) {
-      alert("Invalid Wireshark CSV format. Missing Source/Destination columns.");
+      alert('Invalid Wireshark CSV: missing Source/Destination columns.');
       return;
     }
 
-    let structuralChange = false;
-    let legendChanged = false;
-
-    // Fast CSV Parsing
+    let structural = false, legend = false;
     for (let i = 1; i < lines.length; i++) {
       if (!lines[i].trim()) continue;
-      
-      // Regex handles commas inside quote marks properly
       const cols = lines[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(s => s.replace(/"/g, '').trim());
-      
-      if (cols.length > Math.max(srcIdx, dstIdx)) {
-        const src = cols[srcIdx], dst = cols[dstIdx], proto = cols[protoIdx] || 'UNKNOWN';
-        if (src && dst) {
-           const changes = processPacketData(src, dst, proto);
-           if (changes.structuralChange) structuralChange = true;
-           if (changes.legendChanged) legendChanged = true;
-        }
-      }
+      if (cols.length <= Math.max(srcIdx, dstIdx)) continue;
+      const c = processPacketData(cols[srcIdx], cols[dstIdx], protoIdx >= 0 ? cols[protoIdx] : 'UNKNOWN');
+      if (c.structuralChange) structural = true;
+      if (c.legendChanged) legend = true;
     }
 
-    // Configure UI for Static Playback
     isLive = false;
     timeSlider.max = globalPacketIndex;
-    timeSlider.value = globalPacketIndex; 
-    timeStatus.textContent = 'STATIC';
+    timeSlider.value = globalPacketIndex;
+    timeStatus.textContent = 'CSV';
     timeStatus.style.color = '#58a6ff';
-
-    if (legendChanged) updateLegend();
+    if (legend) updateLegend();
     updateGraph();
-
-  } catch (err) {
-    console.error("Failed to parse CSV", err);
+  } catch(err) {
+    console.error(err);
   }
 }
 
-// --- Event Listeners ---
+// ─── Button Handlers ──────────────────────────────────────────────────────────
 document.getElementById('btnPicker').onclick = async () => {
   try {
     [fileHandle] = await window.showOpenFilePicker();
-    initUI();
-    streamLoop();
-  } catch (err) {}
+    initUI(); streamLoop();
+  } catch(e) {}
+};
+
+document.getElementById('btnPcap').onclick = async () => {
+  try {
+    [fileHandle] = await window.showOpenFilePicker({
+      types: [{ description: 'PCAP Files', accept: { 'application/vnd.tcpdump.pcap': ['.pcap', '.cap'] } }]
+    });
+    initUI(); processStaticPCAP();
+  } catch(e) {}
 };
 
 document.getElementById('btnStatic').onclick = async () => {
   try {
     [fileHandle] = await window.showOpenFilePicker({
-      types: [{ description: 'CSV Files', accept: {'text/csv': ['.csv']} }]
+      types: [{ description: 'CSV Files', accept: { 'text/csv': ['.csv'] } }]
     });
-    initUI();
-    processStaticCSV();
-  } catch (err) {}
+    initUI(); processStaticCSV();
+  } catch(e) {}
 };
+
+window.addEventListener('resize', () => {
+  svg.attr('width', W()).attr('height', H());
+  sim.force('center', d3.forceCenter(W()/2, H()/2)).alpha(0.1).restart();
+});
 </script>
 </body>
 </html>
