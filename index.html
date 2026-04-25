@@ -13,7 +13,7 @@ body { background: #0d1117; color: #e6edf3; font-family: 'Segoe UI', system-ui, 
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; z-index: 100;
 }
 #overlay h1 { font-size: 24px; color: #58a6ff; margin-bottom: 10px; }
-.btn-container { display: flex; flex-wrap: wrap; justify-content: center; gap: 15px; max-width: 800px; }
+.btn-container { display: flex; flex-wrap: wrap; justify-content: center; gap: 15px; max-width: 900px; }
 
 button {
   padding: 14px 32px; color: #fff; border: none;
@@ -21,17 +21,25 @@ button {
   transition: background 0.2s, transform 0.1s;
 }
 button:active { transform: scale(0.98); }
-#btnPicker { background: #238636; }
-#btnPicker:hover { background: #2ea043; }
-#btnStatic { background: #1f6feb; }
-#btnStatic:hover { background: #388bfd; }
-#btnPcap { background: #8957e5; }
-#btnPcap:hover { background: #9d6cfa; }
+#btnPicker  { background: #238636; }
+#btnPicker:hover  { background: #2ea043; }
+#btnStatic  { background: #1f6feb; }
+#btnStatic:hover  { background: #388bfd; }
+#btnPcap    { background: #8957e5; }
+#btnPcap:hover    { background: #9d6cfa; }
+#btnSerial  { background: #b08000; }
+#btnSerial:hover  { background: #d4a017; }
 
-.hint-text { color: #8b949e; font-size: 13px; max-width: 500px; text-align: center; margin-top: 10px; line-height: 1.5; }
+.hint-text { color: #8b949e; font-size: 13px; max-width: 560px; text-align: center; margin-top: 10px; line-height: 1.5; }
 
 #hud { position: fixed; top: 14px; left: 16px; z-index: 10; display: none; }
 #stats { font-size: 13px; color: #8b949e; background: rgba(13,17,23,0.85); padding: 12px; border-radius: 8px; border: 1px solid #30363d; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+
+#serialStatus {
+  position: fixed; top: 58px; left: 16px; z-index: 10; display: none;
+  font-size: 12px; background: rgba(13,17,23,0.9); padding: 8px 12px; border-radius: 6px;
+  border: 1px solid #30363d; color: #d4a017; min-width: 200px;
+}
 
 #progress-bar-wrap {
   position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
@@ -73,18 +81,23 @@ button:active { transform: scale(0.98); }
     <button id="btnPicker">&#x1F4C2; Open Live stream.ndjson</button>
     <button id="btnPcap">&#x1F988; Parse PCAP File</button>
     <button id="btnStatic">&#x1F4CA; Review Wireshark (CSV)</button>
+    <button id="btnSerial">&#x1F4E1; ESP32 WebSerial (PCAPNG)</button>
   </div>
   <p class="hint-text">
-    Supports <b>.pcap / .cap</b> (native binary parsing with VLAN support) and structured <b>.csv / .ndjson</b> formats.<br>
-    <i>Note: Ethernet link layer assumed. PCAPNG format is not supported.</i>
+    Supports <b>.pcap / .cap</b> (native binary parsing with VLAN support), structured <b>.csv / .ndjson</b>, and live <b>ESP32 capture via WebSerial</b> (PCAPNG stream).<br>
+    <i>Note: Ethernet link layer assumed for PCAP. PCAPNG streamed from ESP32 via 921600 baud.</i>
   </p>
 </div>
 
 <div id="hud">
   <div id="stats">
-    Nodes: <b id="nc" style="color:#e6edf3">0</b> &nbsp;|&nbsp; Edges: <b id="ec" style="color:#e6edf3">0</b> &nbsp;|&nbsp; Packets: <b id="pc" style="color:#e6edf3">0</b>
+    Nodes: <b id="nc" style="color:#e6edf3">0</b> &nbsp;|&nbsp;
+    Edges: <b id="ec" style="color:#e6edf3">0</b> &nbsp;|&nbsp;
+    Packets: <b id="pc" style="color:#e6edf3">0</b>
   </div>
 </div>
+
+<div id="serialStatus"></div>
 
 <div id="progress-bar-wrap">
   <div id="progress-label">Parsing PCAP&hellip;</div>
@@ -102,7 +115,7 @@ button:active { transform: scale(0.98); }
 <svg id="svg"></svg>
 
 <script>
-// ─── Core State ──────────────────────────────────────────────────────────────
+// ─── Core State ───────────────────────────────────────────────────────────────
 const nodes = new Map();
 const edges = new Map();
 let bytesRead = 0;
@@ -111,14 +124,13 @@ let fileHandle = null;
 let isLive = true;
 let activeFilter = null;
 
-// ─── Protocol Colors & Legend ─────────────────────────────────────────────────
+// ─── Protocol Colors & Legend ──────────────────────────────────────────────────
 const knownProtos = new Set();
 const colorScale = d3.scaleOrdinal(d3.schemeTableau10);
 
 function updateLegend() {
   const legend = document.getElementById('legend');
   legend.innerHTML = '';
-
   const allDiv = document.createElement('div');
   allDiv.className = 'legend-item';
   allDiv.style.opacity = activeFilter === null ? '1' : '0.4';
@@ -126,7 +138,6 @@ function updateLegend() {
   allDiv.innerHTML = '<b>&#x2B21; ALL PROTOCOLS</b>';
   allDiv.onclick = () => { activeFilter = null; updateLegend(); updateGraph(); };
   legend.appendChild(allDiv);
-
   knownProtos.forEach(p => {
     const div = document.createElement('div');
     div.className = 'legend-item';
@@ -137,7 +148,7 @@ function updateLegend() {
   });
 }
 
-// ─── D3 Setup ─────────────────────────────────────────────────────────────────
+// ─── D3 Setup ──────────────────────────────────────────────────────────────────
 const getRadius = d => Math.min(45, 6 + Math.sqrt(d.currentCount) * 2.5);
 const bisectHistory = d3.bisector(d => d.index).right;
 
@@ -160,35 +171,25 @@ const sim = d3.forceSimulation()
     gNodes.selectAll('.node').attr('transform', d => `translate(${d.x},${d.y})`);
   });
 
-// ─── Graph Update ─────────────────────────────────────────────────────────────
+// ─── Graph Update ──────────────────────────────────────────────────────────────
 function updateGraph() {
   const currentLimit = parseInt(document.getElementById('timeSlider').value);
   document.getElementById('pc').textContent = currentLimit;
-
   const activeNodes = [];
   const activeNodeIds = new Set();
-
   nodes.forEach(n => {
     const splitIndex = bisectHistory(n.history, currentLimit);
     n.currentCount = splitIndex;
     if (n.currentCount === 0) return;
-
     n.displayProto = n.history[splitIndex - 1].proto;
-
     if (!activeFilter) {
-      activeNodes.push(n);
-      activeNodeIds.add(n.id);
+      activeNodes.push(n); activeNodeIds.add(n.id);
     } else {
       for (let i = 0; i < splitIndex; i++) {
-        if (n.history[i].proto === activeFilter) {
-          activeNodes.push(n);
-          activeNodeIds.add(n.id);
-          break;
-        }
+        if (n.history[i].proto === activeFilter) { activeNodes.push(n); activeNodeIds.add(n.id); break; }
       }
     }
   });
-
   const activeEdges = [...edges.values()].filter(e => {
     if (e.firstSeen > currentLimit) return false;
     const srcId = e.source.id !== undefined ? e.source.id : e.source;
@@ -197,50 +198,38 @@ function updateGraph() {
     if (activeFilter && e.proto !== activeFilter) return false;
     return true;
   });
-
   const link = gLinks.selectAll('line').data(activeEdges, d => d.id);
   link.enter().append('line').attr('class', 'link');
   link.exit().remove();
-
   const node = gNodes.selectAll('.node').data(activeNodes, d => d.id);
   const ne = node.enter().append('g').attr('class', 'node')
     .call(d3.drag()
       .on('start', (e, d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
-      .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; })
-      .on('end', (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
-
+      .on('drag',  (e, d) => { d.fx = e.x; d.fy = e.y; })
+      .on('end',   (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
   ne.append('circle')
     .attr('r', d => getRadius(d))
     .attr('fill', d => colorScale(d.displayProto) + '44')
     .attr('stroke', d => colorScale(d.displayProto));
-
   ne.append('text').attr('dy', 22).attr('text-anchor', 'middle').text(d => d.id);
-
-  node.select('circle')
-    .transition().duration(300)
+  node.select('circle').transition().duration(300)
     .attr('r', getRadius)
     .attr('fill', d => colorScale(d.displayProto) + '44')
     .attr('stroke', d => colorScale(d.displayProto));
-
   node.exit().remove();
-
   sim.nodes(activeNodes);
   sim.force('link').links(activeEdges);
   if (sim.alpha() < 0.05) sim.alpha(0.05).restart();
-
   document.getElementById('nc').textContent = activeNodes.length;
   document.getElementById('ec').textContent = activeEdges.length;
 }
 
-// ─── Shared Ingestion ─────────────────────────────────────────────────────────
+// ─── Shared Packet Ingestion ───────────────────────────────────────────────────
 function processPacketData(src, dst, proto) {
   if (!src || !dst) return { structuralChange: false, legendChanged: false };
-  let structuralChange = false;
-  let legendChanged = false;
+  let structuralChange = false, legendChanged = false;
   globalPacketIndex++;
-
   if (!knownProtos.has(proto)) { knownProtos.add(proto); legendChanged = true; }
-
   [src, dst].forEach(id => {
     if (!nodes.has(id)) {
       const peer = nodes.get(id === src ? dst : src);
@@ -251,20 +240,17 @@ function processPacketData(src, dst, proto) {
       structuralChange = true;
     }
   });
-
   const eid = `${src}-${dst}`;
   if (!edges.has(eid)) {
     edges.set(eid, { id: eid, source: src, target: dst, firstSeen: globalPacketIndex, proto });
     structuralChange = true;
   }
-
   return { structuralChange, legendChanged };
 }
 
-// ─── Timeline ────────────────────────────────────────────────────────────────
+// ─── Timeline ──────────────────────────────────────────────────────────────────
 const timeSlider = document.getElementById('timeSlider');
 const timeStatus = document.getElementById('timeStatus');
-
 timeSlider.addEventListener('input', () => {
   isLive = (parseInt(timeSlider.value) === globalPacketIndex);
   timeStatus.textContent = isLive ? 'LIVE' : 'PAUSED';
@@ -279,342 +265,470 @@ function initUI() {
   document.getElementById('timeline').style.display = 'flex';
 }
 
-// ─── Live NDJSON Streaming ────────────────────────────────────────────────────
-async function streamLoop() {
-  if (!fileHandle) return;
-  try {
-    const file = await fileHandle.getFile();
-    if (file.size > bytesRead) {
-      const text = await file.slice(bytesRead).text();
-      bytesRead = file.size;
-      let structural = false, legend = false;
-      text.split('\n').forEach(line => {
-        if (!line.trim()) return;
-        try {
-          const d = JSON.parse(line);
-          const c = processPacketData(d.src, d.dst, d.proto);
-          if (c.structuralChange) structural = true;
-          if (c.legendChanged) legend = true;
-        } catch(e) {}
-      });
-      timeSlider.max = globalPacketIndex;
-      if (legend) updateLegend();
-      if (isLive) { timeSlider.value = globalPacketIndex; if (structural) updateGraph(); }
-    }
-  } catch(err) {}
-  setTimeout(streamLoop, 800);
-}
+// ─── Shared Protocol Tables ────────────────────────────────────────────────────
+const PROTO_MAP = { 1:'ICMP',2:'IGMP',6:'TCP',17:'UDP',41:'IPv6',47:'GRE',50:'ESP',51:'AH',58:'ICMPv6',89:'OSPF',112:'VRRP',132:'SCTP' };
+const PORT_MAP  = {
+  20:'FTP',21:'FTP',22:'SSH',23:'Telnet',25:'SMTP',53:'DNS',67:'DHCP',68:'DHCP',
+  80:'HTTP',110:'POP3',123:'NTP',137:'NetBIOS',138:'NetBIOS',139:'NetBIOS',
+  143:'IMAP',161:'SNMP',162:'SNMP',389:'LDAP',443:'HTTPS',445:'SMB',514:'Syslog',
+  636:'LDAPS',1433:'MSSQL',3306:'MySQL',3389:'RDP',5353:'mDNS',5432:'PostgreSQL'
+};
 
-// ─── IPv6 Address Formatter ──────────────────────────────────────────────────
+// ─── Shared Helpers ────────────────────────────────────────────────────────────
+function formatMAC(dv, offset) {
+  return Array.from({length:6}, (_,i) => dv.getUint8(offset+i).toString(16).padStart(2,'0')).join(':');
+}
 function formatIPv6(dv, offset) {
   const groups = [];
-  for (let i = 0; i < 16; i += 2) {
-    groups.push(dv.getUint16(offset + i, false)); 
+  for (let i = 0; i < 16; i += 2) groups.push(dv.getUint16(offset+i, false));
+  let bestStart=-1, bestLen=0, curStart=-1, curLen=0;
+  for (let i = 0; i < 8; i++) {
+    if (groups[i]===0) { if(curStart===-1){curStart=i;curLen=1;}else curLen++; if(curLen>bestLen){bestStart=curStart;bestLen=curLen;} }
+    else { curStart=-1; curLen=0; }
+  }
+  if (bestLen < 2) return groups.map(g=>g.toString(16)).join(':');
+  return groups.slice(0,bestStart).map(g=>g.toString(16)).join(':') + '::' + groups.slice(bestStart+bestLen).map(g=>g.toString(16)).join(':');
+}
+
+// ─── Shared Network Frame Parser ─────────────────────────────────────────────
+function parseEthernetFrame(dv, pktStart, inclLen, linkType, totalBytes) {
+  const cap = totalBytes || dv.byteLength;
+  let etherType = 0, ipStart = 0, srcMac = '', dstMac = '';
+
+  // --- NEW: 802.11 & Radiotap Support ---
+  if (linkType === 105 || linkType === 127) {
+    let offset = pktStart;
+    if (linkType === 127) {
+      if (inclLen < 4) return null;
+      const rtLen = dv.getUint16(pktStart + 2, true); // Radiotap length is Little Endian
+      offset += rtLen;
+    }
+    const wifiLen = inclLen - (offset - pktStart);
+    if (wifiLen < 10) return null;
+
+    const fc0 = dv.getUint8(offset);
+    const fc1 = dv.getUint8(offset + 1);
+    const type = (fc0 >> 2) & 0x03;
+    const subtype = (fc0 >> 4) & 0x0F;
+    const dsBits = fc1 & 0x03;
+
+    const a1 = formatMAC(dv, offset + 4);
+    let a2 = '', a3 = '';
+    if (wifiLen >= 16) a2 = formatMAC(dv, offset + 10);
+    if (wifiLen >= 22) a3 = formatMAC(dv, offset + 16);
+
+    let src = '', dst = '';
+    // Determine SRC and DST based on Distribution System (DS) status bits
+    if (dsBits === 0)      { dst = a1; src = a2; } 
+    else if (dsBits === 1) { dst = a3; src = a2; } 
+    else if (dsBits === 2) { dst = a1; src = a3; } 
+    else if (dsBits === 3) { dst = a3; src = a2; }
+
+    if (!src || !dst) return null;
+
+    let proto = '802.11';
+    if (type === 0) {
+      if (subtype === 4) proto = 'ProbeReq';
+      else if (subtype === 5) proto = 'ProbeResp';
+      else if (subtype === 8) proto = 'Beacon';
+      else proto = `Mgt-${subtype}`;
+    } else if (type === 1) {
+      if (subtype === 11) proto = 'RTS';
+      else if (subtype === 13) proto = 'ACK';
+      else proto = `Ctrl-${subtype}`;
+    } else if (type === 2) {
+      if (subtype === 8) proto = 'QoS-Data';
+      else proto = `Data`;
+    }
+    return { src, dst, proto };
   }
 
-  let bestStart = -1, bestLen = 0, curStart = -1, curLen = 0;
-  for (let i = 0; i < 8; i++) {
-    if (groups[i] === 0) {
-      if (curStart === -1) { curStart = i; curLen = 1; }
-      else curLen++;
-      if (curLen > bestLen) { bestStart = curStart; bestLen = curLen; }
-    } else {
-      curStart = -1; curLen = 0;
+  // --- Existing Ethernet Support ---
+  if (linkType === 1) {
+    if (inclLen < 14) return null;
+    dstMac = formatMAC(dv, pktStart);
+    srcMac  = formatMAC(dv, pktStart+6);
+    etherType = dv.getUint16(pktStart+12, false);
+    ipStart = pktStart + 14;
+    // Raw IP heuristic
+    if (dv.getUint8(pktStart)===0x45 && inclLen>=20) {
+      const ipLen = dv.getUint16(pktStart+2, false);
+      if (ipLen<=inclLen && ipLen>=inclLen-14) { etherType=0x0800; ipStart=pktStart; }
+    }
+    // Strip VLAN tags
+    let vlanStrips=0;
+    while ((etherType===0x8100||etherType===0x88A8||etherType===0x9100) && vlanStrips<3) {
+      if (ipStart+4>cap) break;
+      etherType=dv.getUint16(ipStart+2,false); ipStart+=4; vlanStrips++;
+    }
+    // PPPoE
+    if (etherType===0x8864 && ipStart+8<=cap) {
+      const pppProto=dv.getUint16(ipStart+6,false);
+      if (pppProto===0x0021) etherType=0x0800; else if(pppProto===0x0057) etherType=0x86DD;
+      ipStart+=8;
+    }
+    // LLC/SNAP
+    if (etherType<=1500 && ipStart+8<=cap) {
+      const dsap=dv.getUint8(ipStart), ssap=dv.getUint8(ipStart+1);
+      if (dsap===0xAA&&ssap===0xAA) { etherType=dv.getUint16(ipStart+6,false); ipStart+=8; }
+    }
+  } else if (linkType===113) {
+    if (inclLen<16) return null;
+    etherType=dv.getUint16(pktStart+14,false); ipStart=pktStart+16;
+    srcMac='SLL-Source'; dstMac='SLL-Dest';
+  } else if (linkType===101||linkType===12||linkType===228) {
+    const ver=dv.getUint8(pktStart)>>4;
+    etherType = ver===6 ? 0x86DD : 0x0800; ipStart=pktStart;
+  } else if (linkType===0) {
+    if (inclLen<4) return null;
+    const ver=dv.getUint8(pktStart+4)>>4;
+    etherType=ver===6?0x86DD:0x0800; ipStart=pktStart+4;
+  } else return null;
+
+  let src='', dst='', proto='';
+
+  if (etherType===0x0800) {
+    if (ipStart+20>cap) return null;
+    const ihl=(dv.getUint8(ipStart)&0x0F)*4;
+    if (ihl<20||ipStart+ihl>cap) return null;
+    const protoNum=dv.getUint8(ipStart+9);
+    src=`${dv.getUint8(ipStart+12)}.${dv.getUint8(ipStart+13)}.${dv.getUint8(ipStart+14)}.${dv.getUint8(ipStart+15)}`;
+    dst=`${dv.getUint8(ipStart+16)}.${dv.getUint8(ipStart+17)}.${dv.getUint8(ipStart+18)}.${dv.getUint8(ipStart+19)}`;
+    const tStart=ipStart+ihl;
+    if ((protoNum===6||protoNum===17)&&tStart+4<=cap) {
+      const sp=dv.getUint16(tStart,false), dp=dv.getUint16(tStart+2,false);
+      proto=PORT_MAP[sp]||PORT_MAP[dp]||(protoNum===6?'TCP':'UDP');
+    } else proto=PROTO_MAP[protoNum]||`IPv4-${protoNum}`;
+  } else if (etherType===0x86DD) {
+    if (ipStart+40>cap) return null;
+    const nextHeader=dv.getUint8(ipStart+6);
+    src=formatIPv6(dv,ipStart+8); dst=formatIPv6(dv,ipStart+24);
+    const tStart=ipStart+40;
+    if ((nextHeader===6||nextHeader===17)&&tStart+4<=cap) {
+      const sp=dv.getUint16(tStart,false), dp=dv.getUint16(tStart+2,false);
+      proto=PORT_MAP[sp]||PORT_MAP[dp]||(nextHeader===6?'TCP':'UDP');
+    } else proto=PROTO_MAP[nextHeader]||`IPv6-${nextHeader}`;
+  } else if (etherType===0x0806) {
+    proto='ARP';
+    if (ipStart+28<=cap) {
+      const hlen=dv.getUint8(ipStart+4), plen=dv.getUint8(ipStart+5);
+      if (plen===4&&hlen===6&&ipStart+8+hlen*2+plen*2<=cap) {
+        const sOff=ipStart+8+hlen, tOff=sOff+plen+hlen;
+        src=`${dv.getUint8(sOff)}.${dv.getUint8(sOff+1)}.${dv.getUint8(sOff+2)}.${dv.getUint8(sOff+3)}`;
+        dst=`${dv.getUint8(tOff)}.${dv.getUint8(tOff+1)}.${dv.getUint8(tOff+2)}.${dv.getUint8(tOff+3)}`;
+      }
+    }
+  } else {
+    if (srcMac&&dstMac&&srcMac!=='SLL-Source') {
+      proto=etherType<=1500?'802.3/LLC':`Eth-0x${etherType.toString(16).padStart(4,'0')}`;
+      src=srcMac; dst=dstMac;
     }
   }
-
-  if (bestLen < 2) {
-    return groups.map(g => g.toString(16)).join(':');
-  }
-  const left  = groups.slice(0, bestStart).map(g => g.toString(16)).join(':');
-  const right = groups.slice(bestStart + bestLen).map(g => g.toString(16)).join(':');
-  return `${left}::${right}`;
+  return (src&&dst) ? {src,dst,proto} : null;
 }
 
-// ─── PCAP Parser ─────────────────────────────────────────────────────────────
-const PROTO_MAP = { 1:'ICMP', 2:'IGMP', 6:'TCP', 17:'UDP', 41:'IPv6', 47:'GRE', 50:'ESP', 51:'AH', 58:'ICMPv6', 89:'OSPF', 112:'VRRP', 132:'SCTP' };
-
-const PORT_MAP = {
-  20: 'FTP', 21: 'FTP', 22: 'SSH', 23: 'Telnet', 25: 'SMTP', 
-  53: 'DNS', 67: 'DHCP', 68: 'DHCP', 80: 'HTTP', 110: 'POP3', 
-  123: 'NTP', 137: 'NetBIOS', 138: 'NetBIOS', 139: 'NetBIOS', 
-  143: 'IMAP', 161: 'SNMP', 162: 'SNMP', 389: 'LDAP', 443: 'HTTPS', 
-  445: 'SMB', 514: 'Syslog', 636: 'LDAPS', 1433: 'MSSQL', 
-  3306: 'MySQL', 3389: 'RDP', 5353: 'mDNS', 5432: 'PostgreSQL'
-};
+// ─── Progress Bar ──────────────────────────────────────────────────────────────
 function setProgress(pct, label) {
   const wrap = document.getElementById('progress-bar-wrap');
-  wrap.style.display = 'block';
-  document.getElementById('progress-label').textContent = label || 'Parsing PCAP\u2026';
-  document.getElementById('progress-fill').style.width = pct + '%';
-  if (pct >= 100) setTimeout(() => { wrap.style.display = 'none'; }, 400);
+  wrap.style.display='block';
+  document.getElementById('progress-label').textContent = label||'Parsing PCAP\u2026';
+  document.getElementById('progress-fill').style.width = pct+'%';
+  if (pct>=100) setTimeout(()=>{ wrap.style.display='none'; },400);
 }
 
-// ─── MAC Address Formatter ───────────────────────────────────────────────────
-function formatMAC(dv, offset) {
-  return Array.from({length: 6}, (_, i) => dv.getUint8(offset + i).toString(16).padStart(2, '0')).join(':');
-}
-
+// ─── PCAP File Parser ──────────────────────────────────────────────────────────
 async function processStaticPCAP() {
   try {
     const file = await fileHandle.getFile();
     const arrayBuffer = await file.arrayBuffer();
     const dv = new DataView(arrayBuffer);
     const total = arrayBuffer.byteLength;
-
-    if (total < 24) throw new Error("File too small to be a PCAP");
-
-    const magic = dv.getUint32(0, true);
+    if (total<24) throw new Error("File too small");
+    const magic=dv.getUint32(0,true);
     let le;
-    if (magic === 0xa1b2c3d4 || magic === 0xa1b23c4d) le = true;
-    else if (magic === 0xd4c3b2a1 || magic === 0x4d3cb2a1) le = false;
-    else { alert('Invalid PCAP file: unknown magic number.'); return; }
-
-    const linkType = dv.getUint32(20, le);
-    
-    let offset = 24; 
-    let structural = false, legend = false;
-    let packetCount = 0;
-    const CHUNK = 2500; 
-
-    setProgress(0, 'Starting PCAP Parse\u2026');
-
-    while (offset < total) {
-      let processedInChunk = 0;
-
-      while (offset < total && processedInChunk < CHUNK) {
-        if (offset + 16 > total) break;
-
-        const inclLen = dv.getUint32(offset + 8, le);
-        const pktStart = offset + 16;
-        offset = pktStart + inclLen; 
-        processedInChunk++;
-        packetCount++;
-
-        if (offset > total || inclLen === 0) continue;
-
-        let etherType = 0;
-        let ipStart = 0;
-        let ethOffset = pktStart;
-        let srcMac = '', dstMac = '';
-
-        // --- ENCAPSULATION UNWRAPPING ---
-        if (linkType === 1) { 
-          if (inclLen < 14) continue;
-          dstMac = formatMAC(dv, ethOffset);
-          srcMac = formatMAC(dv, ethOffset + 6);
-          etherType = dv.getUint16(ethOffset + 12, false);
-          ipStart = ethOffset + 14;
-
-          if (dv.getUint8(pktStart) === 0x45 && inclLen >= 20) {
-            const ipLen = dv.getUint16(pktStart + 2, false);
-            if (ipLen <= inclLen && ipLen >= inclLen - 14) {
-               etherType = 0x0800; 
-               ipStart = pktStart;
-            }
-          }
-
-          let vlanStrips = 0;
-          while ((etherType === 0x8100 || etherType === 0x88A8 || etherType === 0x9100) && vlanStrips < 3) {
-            if (ipStart + 4 > total) break;
-            etherType = dv.getUint16(ipStart + 2, false);
-            ipStart += 4;
-            vlanStrips++;
-          }
-
-          if (etherType === 0x8864 && ipStart + 8 <= total) {
-            const pppProto = dv.getUint16(ipStart + 6, false);
-            if (pppProto === 0x0021) etherType = 0x0800; 
-            else if (pppProto === 0x0057) etherType = 0x86DD; 
-            ipStart += 8;
-          }
-
-          if (etherType <= 1500 && ipStart + 8 <= total) {
-            const dsap = dv.getUint8(ipStart);
-            const ssap = dv.getUint8(ipStart + 1);
-            if (dsap === 0xAA && ssap === 0xAA) {
-              etherType = dv.getUint16(ipStart + 6, false);
-              ipStart += 8;
-            }
-          }
-        } 
-        else if (linkType === 113) { 
-          if (inclLen < 16) continue;
-          etherType = dv.getUint16(ethOffset + 14, false);
-          ipStart = ethOffset + 16;
-          srcMac = 'SLL-Source'; dstMac = 'SLL-Dest';
-        } 
-        else if (linkType === 101 || linkType === 12 || linkType === 228) { 
-          const ver = dv.getUint8(pktStart) >> 4;
-          etherType = ver === 6 ? 0x86DD : 0x0800;
-          ipStart = pktStart;
-        } 
-        else if (linkType === 0) { 
-          if (inclLen < 4) continue;
-          const ver = dv.getUint8(pktStart + 4) >> 4;
-          etherType = ver === 6 ? 0x86DD : 0x0800;
-          ipStart = pktStart + 4;
-        } 
-        else { continue; }
-
-        let src = '', dst = '', proto = '';
-
-        // --- PROTOCOL EXTRACTION & PORT RESOLUTION ---
-        if (etherType === 0x0800) { // IPv4
-          if (ipStart + 20 > total) continue;
-          const ihl = (dv.getUint8(ipStart) & 0x0F) * 4;
-          if (ihl < 20 || ipStart + ihl > total) continue;
-          const protoNum = dv.getUint8(ipStart + 9);
-          
-          src = `${dv.getUint8(ipStart+12)}.${dv.getUint8(ipStart+13)}.${dv.getUint8(ipStart+14)}.${dv.getUint8(ipStart+15)}`;
-          dst = `${dv.getUint8(ipStart+16)}.${dv.getUint8(ipStart+17)}.${dv.getUint8(ipStart+18)}.${dv.getUint8(ipStart+19)}`;
-
-          // Read TCP/UDP Ports if applicable
-          let transportStart = ipStart + ihl;
-          if ((protoNum === 6 || protoNum === 17) && transportStart + 4 <= total) {
-            const srcPort = dv.getUint16(transportStart, false);
-            const dstPort = dv.getUint16(transportStart + 2, false);
-            // Check dictionary using either port (client to server OR server to client)
-            proto = PORT_MAP[srcPort] || PORT_MAP[dstPort] || (protoNum === 6 ? 'TCP' : 'UDP');
-          } else {
-            proto = PROTO_MAP[protoNum] || `IPv4-${protoNum}`;
-          }
-        } 
-        else if (etherType === 0x86DD) { // IPv6
-          if (ipStart + 40 > total) continue;
-          const nextHeader = dv.getUint8(ipStart + 6);
-          
-          src = formatIPv6(dv, ipStart + 8);
-          dst = formatIPv6(dv, ipStart + 24);
-
-          // Read TCP/UDP Ports (Assuming no IPv6 extension headers for performance/simplicity)
-          let transportStart = ipStart + 40;
-          if ((nextHeader === 6 || nextHeader === 17) && transportStart + 4 <= total) {
-            const srcPort = dv.getUint16(transportStart, false);
-            const dstPort = dv.getUint16(transportStart + 2, false);
-            proto = PORT_MAP[srcPort] || PORT_MAP[dstPort] || (nextHeader === 6 ? 'TCP' : 'UDP');
-          } else {
-            proto = PROTO_MAP[nextHeader] || `IPv6-${nextHeader}`;
-          }
-        } 
-        else if (etherType === 0x0806) { // ARP
-          proto = 'ARP';
-          if (ipStart + 28 <= total) {
-            const hlen = dv.getUint8(ipStart + 4); 
-            const plen = dv.getUint8(ipStart + 5); 
-            if (plen === 4 && hlen === 6 && ipStart + 8 + hlen*2 + plen*2 <= total) {
-              const senderIPOff = ipStart + 8 + hlen;
-              const targetIPOff = senderIPOff + plen + hlen;
-              src = `${dv.getUint8(senderIPOff)}.${dv.getUint8(senderIPOff+1)}.${dv.getUint8(senderIPOff+2)}.${dv.getUint8(senderIPOff+3)}`;
-              dst = `${dv.getUint8(targetIPOff)}.${dv.getUint8(targetIPOff+1)}.${dv.getUint8(targetIPOff+2)}.${dv.getUint8(targetIPOff+3)}`;
-            }
-          }
-        } 
-        else {
-          // --- FALLBACK TO MAC ---
-          if (srcMac && dstMac && srcMac !== 'SLL-Source') {
-            proto = etherType <= 1500 ? '802.3/LLC' : `Eth-0x${etherType.toString(16).padStart(4, '0')}`;
-            src = srcMac;
-            dst = dstMac;
-          }
-        }
-
-        if (src && dst) {
-          const c = processPacketData(src, dst, proto);
-          if (c.structuralChange) structural = true;
-          if (c.legendChanged) legend = true;
+    if (magic===0xa1b2c3d4||magic===0xa1b23c4d) le=true;
+    else if (magic===0xd4c3b2a1||magic===0x4d3cb2a1) le=false;
+    else { alert('Invalid PCAP: unknown magic'); return; }
+    const linkType=dv.getUint32(20,le);
+    let offset=24, structural=false, legend=false, packetCount=0;
+    const CHUNK=2500;
+    setProgress(0,'Starting PCAP Parse\u2026');
+    while (offset<total) {
+      let done=0;
+      while (offset<total && done<CHUNK) {
+        if (offset+16>total) break;
+        const inclLen=dv.getUint32(offset+8,le);
+        const pktStart=offset+16;
+        offset=pktStart+inclLen; done++; packetCount++;
+        if (offset>total||inclLen===0) continue;
+        const r=parseEthernetFrame(dv,pktStart,inclLen,linkType,total);
+        if (r) {
+          const c=processPacketData(r.src,r.dst,r.proto);
+          if(c.structuralChange) structural=true;
+          if(c.legendChanged)    legend=true;
         }
       }
-
-      if (offset < total) {
-        const pct = Math.min(99, Math.round((offset / total) * 100));
-        setProgress(pct, `Parsing PCAP\u2026 ${packetCount.toLocaleString()} packets`);
-        await new Promise(r => setTimeout(r, 0)); 
+      if (offset<total) {
+        setProgress(Math.min(99,Math.round((offset/total)*100)),`Parsing PCAP\u2026 ${packetCount.toLocaleString()} packets`);
+        await new Promise(r=>setTimeout(r,0));
       }
     }
-
     setProgress(100);
-    isLive = false;
-    timeSlider.max = globalPacketIndex;
-    timeSlider.value = globalPacketIndex;
-    timeStatus.textContent = 'PCAP';
-    timeStatus.style.color = '#8957e5';
-    
-    if (legend) updateLegend();
+    isLive=false;
+    timeSlider.max=globalPacketIndex; timeSlider.value=globalPacketIndex;
+    timeStatus.textContent='PCAP'; timeStatus.style.color='#8957e5';
+    if(legend) updateLegend();
     updateGraph();
-
-  } catch (err) {
-    document.getElementById('progress-bar-wrap').style.display = 'none';
-    alert('Failed to parse PCAP: ' + err.message);
-    console.error(err);
+  } catch(err) {
+    document.getElementById('progress-bar-wrap').style.display='none';
+    alert('Failed to parse PCAP: '+err.message);
   }
 }
 
-// ─── Wireshark CSV ────────────────────────────────────────────────────────────
+// ─── Wireshark CSV Parser ──────────────────────────────────────────────────────
 async function processStaticCSV() {
   try {
     const file = await fileHandle.getFile();
     const text = await file.text();
     const lines = text.split('\n');
     if (!lines.length) return;
-
-    const headers = lines[0].replace(/"/g, '').split(',');
-    const srcIdx   = headers.findIndex(h => h.trim().toLowerCase() === 'source');
-    const dstIdx   = headers.findIndex(h => h.trim().toLowerCase() === 'destination');
-    const protoIdx = headers.findIndex(h => h.trim().toLowerCase() === 'protocol');
-
-    if (srcIdx === -1 || dstIdx === -1) {
-      alert('Invalid Wireshark CSV: missing Source/Destination columns.');
-      return;
-    }
-
-    let structural = false, legend = false;
-    for (let i = 1; i < lines.length; i++) {
+    const headers=lines[0].replace(/"/g,'').split(',');
+    const srcIdx  =headers.findIndex(h=>h.trim().toLowerCase()==='source');
+    const dstIdx  =headers.findIndex(h=>h.trim().toLowerCase()==='destination');
+    const protoIdx=headers.findIndex(h=>h.trim().toLowerCase()==='protocol');
+    if (srcIdx===-1||dstIdx===-1) { alert('Invalid Wireshark CSV'); return; }
+    let structural=false, legend=false;
+    for (let i=1;i<lines.length;i++) {
       if (!lines[i].trim()) continue;
-      const cols = lines[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(s => s.replace(/"/g, '').trim());
-      if (cols.length <= Math.max(srcIdx, dstIdx)) continue;
-      const c = processPacketData(cols[srcIdx], cols[dstIdx], protoIdx >= 0 ? cols[protoIdx] : 'UNKNOWN');
-      if (c.structuralChange) structural = true;
-      if (c.legendChanged) legend = true;
+      const cols=lines[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(s=>s.replace(/"/g,'').trim());
+      if (cols.length<=Math.max(srcIdx,dstIdx)) continue;
+      const c=processPacketData(cols[srcIdx],cols[dstIdx],protoIdx>=0?cols[protoIdx]:'UNKNOWN');
+      if(c.structuralChange) structural=true;
+      if(c.legendChanged)    legend=true;
     }
-
-    isLive = false;
-    timeSlider.max = globalPacketIndex;
-    timeSlider.value = globalPacketIndex;
-    timeStatus.textContent = 'CSV';
-    timeStatus.style.color = '#58a6ff';
-    if (legend) updateLegend();
+    isLive=false;
+    timeSlider.max=globalPacketIndex; timeSlider.value=globalPacketIndex;
+    timeStatus.textContent='CSV'; timeStatus.style.color='#58a6ff';
+    if(legend) updateLegend();
     updateGraph();
+  } catch(err) { console.error(err); }
+}
+
+// ─── Live NDJSON Stream ────────────────────────────────────────────────────────
+async function streamLoop() {
+  if (!fileHandle) return;
+  try {
+    const file = await fileHandle.getFile();
+    const stream = file.stream();
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (value) {
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // Hold onto the last incomplete line
+        let structural = false, legend = false;
+        
+        lines.forEach(line => {
+          if(!line.trim()) return;
+          try {
+            const d = JSON.parse(line);
+            const c = processPacketData(d.src, d.dst, d.proto);
+            if(c.structuralChange) structural = true;
+            if(c.legendChanged) legend = true;
+          } catch(e){}
+        });
+        
+        timeSlider.max = globalPacketIndex;
+        if(legend) updateLegend();
+        if(isLive){ timeSlider.value = globalPacketIndex; if(structural) updateGraph(); }
+      }
+      if (done) break;
+    }
   } catch(err) {
-    console.error(err);
+    console.error("Stream reader error:", err);
   }
 }
 
-// ─── Button Handlers ──────────────────────────────────────────────────────────
-document.getElementById('btnPicker').onclick = async () => {
-  try {
-    [fileHandle] = await window.showOpenFilePicker();
-    initUI(); streamLoop();
-  } catch(e) {}
-};
+// ─── ESP32 WebSerial + PCAPNG Streaming ───────────────────────────────────────
+let serialPort = null;
+let serialReader = null;
 
+function setSerialStatus(msg, color) {
+  const el=document.getElementById('serialStatus');
+  el.style.display = msg ? 'block' : 'none';
+  el.style.color = color||'#d4a017';
+  el.textContent = msg;
+}
+
+async function connectWebSerial() {
+  if (!('serial' in navigator)) {
+    alert('WebSerial not supported in this browser.\nUse Chrome or Edge.');
+    return;
+  }
+  try {
+    serialPort = await navigator.serial.requestPort();
+    await serialPort.open({ baudRate: 921600 });
+
+    setSerialStatus('Rebooting ESP32 via DTR/RTS…', '#d4a017');
+    await serialPort.setSignals({ dataTerminalReady: false, requestToSend: false });
+    await new Promise(r=>setTimeout(r,100));
+    await serialPort.setSignals({ dataTerminalReady: true, requestToSend: true });
+    await new Promise(r=>setTimeout(r,500));
+
+    initUI();
+    timeStatus.textContent='LIVE';
+    timeStatus.style.color='#d4a017';
+    setSerialStatus('Waiting for PCAPNG magic…', '#d4a017');
+
+    streamPCAPNG(serialPort);
+  } catch(e) {
+    setSerialStatus('');
+    if (e.name !== 'NotFoundError') console.error(e);
+  }
+}
+
+async function streamPCAPNG(port) {
+  serialReader = port.readable.getReader();
+
+  let buf = new Uint8Array(0);
+  let synced = false;
+  let le = true;          
+  let linkType = 1;        
+  let bytesCapured = 0;
+
+  const PCAPNG_MAGIC = [0x0A, 0x0D, 0x0D, 0x0A];
+
+  function concat(a, b) {
+    const c = new Uint8Array(a.length + b.length);
+    c.set(a); c.set(b, a.length);
+    return c;
+  }
+
+  function findMagic(b) {
+    for (let i=0; i<=b.length-4; i++) {
+      if (b[i]===0x0A && b[i+1]===0x0D && b[i+2]===0x0D && b[i+3]===0x0A) return i;
+    }
+    return -1;
+  }
+
+  function processBlocks() {
+    let structural=false, legendChanged=false;
+
+    while (buf.length >= 8) {
+      const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+      const blockType = dv.getUint32(0, le);
+      const blockLen  = dv.getUint32(4, le);
+
+      if (blockLen < 12 || blockLen > 16_000_000) {
+        buf = buf.slice(1);
+        continue;
+      }
+      if (buf.length < blockLen) break; 
+
+      const bDV = new DataView(buf.buffer, buf.byteOffset, blockLen);
+
+      if (blockType === 0x0A0D0D0A) {
+        const bom = bDV.getUint32(8, true);   
+        le = (bom === 0x1A2B3C4D);
+      } else if (blockType === 0x00000001) {
+        linkType = bDV.getUint16(8, le);
+      } else if (blockType === 0x00000006) {
+        // Enhanced Packet Block
+        const capLen2 = bDV.getUint32(20, le);
+        const pktOffset = 28; // <--- Corrected offset for EPB raw data
+
+        if (pktOffset + capLen2 <= blockLen) {
+          const r = parseEthernetFrame(bDV, pktOffset, capLen2, linkType, blockLen);
+          if (r) {
+            const c = processPacketData(r.src, r.dst, r.proto);
+            if(c.structuralChange) structural=true;
+            if(c.legendChanged)    legendChanged=true;
+            bytesCapured += capLen2;
+          }
+        }
+      } else if (blockType === 0x00000003) {
+        const origLen = bDV.getUint32(8, le);
+        const pktData = blockLen - 16;  
+        const capLen  = Math.min(origLen, pktData);
+        if (capLen > 0 && 12 + capLen <= blockLen) {
+          const r = parseEthernetFrame(bDV, 12, capLen, linkType, blockLen);
+          if (r) {
+            const c = processPacketData(r.src, r.dst, r.proto);
+            if(c.structuralChange) structural=true;
+            if(c.legendChanged)    legendChanged=true;
+          }
+        }
+      }
+      buf = buf.slice(blockLen);
+    }
+
+    if (buf.length > 2_000_000) buf = buf.slice(buf.length - 1_000_000);
+
+    timeSlider.max = globalPacketIndex;
+    if (legendChanged) updateLegend();
+    if (isLive && structural) {
+      timeSlider.value = globalPacketIndex;
+      updateGraph();
+    }
+    setSerialStatus(`Serial LIVE — ${globalPacketIndex.toLocaleString()} pkts | ${(bytesCapured/1024).toFixed(1)} KB`, '#3fb950');
+  }
+
+  try {
+    while (true) {
+      const { value, done } = await serialReader.read();
+      if (done) break;
+      if (!value || value.length === 0) continue;
+
+      if (!synced) {
+        buf = concat(buf, value);
+        const idx = findMagic(buf);
+        if (idx !== -1) {
+          buf = buf.slice(idx);  
+          synced = true;
+          setSerialStatus('Synced to PCAPNG stream — capturing…', '#3fb950');
+        } else {
+          if (buf.length > 50_000) buf = buf.slice(-4096);
+        }
+      } else {
+        buf = concat(buf, value);
+        processBlocks();
+      }
+    }
+  } catch(err) {
+    if (err.name !== 'AbortError') console.error('WebSerial read error:', err);
+  } finally {
+    serialReader = null;
+    setSerialStatus('Serial connection closed.', '#f85149');
+  }
+}
+
+async function disconnectSerial() {
+  if (serialReader) { try { await serialReader.cancel(); } catch(e){} }
+  if (serialPort && serialPort.readable) { try { await serialPort.close(); } catch(e){} serialPort=null; }
+  setSerialStatus('');
+}
+
+// ─── Button Handlers ───────────────────────────────────────────────────────────
+document.getElementById('btnPicker').onclick = async () => {
+  try { [fileHandle] = await window.showOpenFilePicker(); initUI(); streamLoop(); } catch(e){}
+};
 document.getElementById('btnPcap').onclick = async () => {
   try {
-    [fileHandle] = await window.showOpenFilePicker({
-      types: [{ description: 'PCAP Files', accept: { 'application/vnd.tcpdump.pcap': ['.pcap', '.cap'] } }]
-    });
+    [fileHandle] = await window.showOpenFilePicker({ types:[{description:'PCAP Files',accept:{'application/vnd.tcpdump.pcap':['.pcap','.cap']}}] });
     initUI(); processStaticPCAP();
-  } catch(e) {}
+  } catch(e){}
 };
-
 document.getElementById('btnStatic').onclick = async () => {
   try {
-    [fileHandle] = await window.showOpenFilePicker({
-      types: [{ description: 'CSV Files', accept: { 'text/csv': ['.csv'] } }]
-    });
+    [fileHandle] = await window.showOpenFilePicker({ types:[{description:'CSV Files',accept:{'text/csv':['.csv']}}] });
     initUI(); processStaticCSV();
-  } catch(e) {}
+  } catch(e){}
 };
+document.getElementById('btnSerial').onclick = connectWebSerial;
 
 window.addEventListener('resize', () => {
   svg.attr('width', W()).attr('height', H());
