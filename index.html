@@ -118,11 +118,49 @@ button:active { transform: scale(0.98); }
 // ─── Core State ───────────────────────────────────────────────────────────────
 const nodes = new Map();
 const edges = new Map();
-let bytesRead = 0;
 let globalPacketIndex = 0;
 let fileHandle = null;
 let isLive = true;
 let activeFilter = null;
+
+// ─── OUI Resolution State ──────────────────────────────────────────────────────
+const ouiMap = new Map();
+const resolvedMacs = new Map();
+
+async function loadOUIDatabase() {
+  if (ouiMap.size > 0) return;
+  try {
+    setSerialStatus('Downloading OUI Database...', '#58a6ff');
+    const res = await fetch('https://unpkg.com/oui-data@latest/index.json');
+    const data = await res.json();
+    for (const [prefix, vendor] of Object.entries(data)) {
+      ouiMap.set(prefix.toUpperCase(), vendor);
+    }
+    setSerialStatus('OUI Database loaded.', '#3fb950');
+    setTimeout(() => setSerialStatus(''), 2000);
+  } catch (e) {
+    console.warn("Failed to load OUI database, falling back to raw MACs.", e);
+  }
+}
+
+function getMacDisplayName(mac) {
+  if (mac.includes('.') || mac.includes('::') || mac.length !== 17) return mac;
+  if (resolvedMacs.has(mac)) return resolvedMacs.get(mac);
+
+  const prefix = mac.replace(/:/g, '').substring(0, 6).toUpperCase();
+  const vendor = ouiMap.get(prefix);
+
+  if (vendor) {
+    const shortVendor = vendor.split(' ')[0].replace(/[,.]/g, ''); 
+    const suffix = mac.substring(9);
+    const displayName = `${shortVendor}_${suffix}`;
+    resolvedMacs.set(mac, displayName);
+    return displayName;
+  }
+
+  resolvedMacs.set(mac, mac);
+  return mac;
+}
 
 // ─── Protocol Colors & Legend ──────────────────────────────────────────────────
 const knownProtos = new Set();
@@ -225,8 +263,12 @@ function updateGraph() {
 }
 
 // ─── Shared Packet Ingestion ───────────────────────────────────────────────────
-function processPacketData(src, dst, proto) {
-  if (!src || !dst) return { structuralChange: false, legendChanged: false };
+function processPacketData(rawSrc, rawDst, proto) {
+  if (!rawSrc || !rawDst) return { structuralChange: false, legendChanged: false };
+  
+  const src = getMacDisplayName(rawSrc);
+  const dst = getMacDisplayName(rawDst);
+
   let structuralChange = false, legendChanged = false;
   globalPacketIndex++;
   if (!knownProtos.has(proto)) { knownProtos.add(proto); legendChanged = true; }
@@ -295,12 +337,11 @@ function parseEthernetFrame(dv, pktStart, inclLen, linkType, totalBytes) {
   const cap = totalBytes || dv.byteLength;
   let etherType = 0, ipStart = 0, srcMac = '', dstMac = '';
 
-  // --- NEW: 802.11 & Radiotap Support ---
   if (linkType === 105 || linkType === 127) {
     let offset = pktStart;
     if (linkType === 127) {
       if (inclLen < 4) return null;
-      const rtLen = dv.getUint16(pktStart + 2, true); // Radiotap length is Little Endian
+      const rtLen = dv.getUint16(pktStart + 2, true); 
       offset += rtLen;
     }
     const wifiLen = inclLen - (offset - pktStart);
@@ -318,7 +359,6 @@ function parseEthernetFrame(dv, pktStart, inclLen, linkType, totalBytes) {
     if (wifiLen >= 22) a3 = formatMAC(dv, offset + 16);
 
     let src = '', dst = '';
-    // Determine SRC and DST based on Distribution System (DS) status bits
     if (dsBits === 0)      { dst = a1; src = a2; } 
     else if (dsBits === 1) { dst = a3; src = a2; } 
     else if (dsBits === 2) { dst = a1; src = a3; } 
@@ -343,31 +383,26 @@ function parseEthernetFrame(dv, pktStart, inclLen, linkType, totalBytes) {
     return { src, dst, proto };
   }
 
-  // --- Existing Ethernet Support ---
   if (linkType === 1) {
     if (inclLen < 14) return null;
     dstMac = formatMAC(dv, pktStart);
     srcMac  = formatMAC(dv, pktStart+6);
     etherType = dv.getUint16(pktStart+12, false);
     ipStart = pktStart + 14;
-    // Raw IP heuristic
     if (dv.getUint8(pktStart)===0x45 && inclLen>=20) {
       const ipLen = dv.getUint16(pktStart+2, false);
       if (ipLen<=inclLen && ipLen>=inclLen-14) { etherType=0x0800; ipStart=pktStart; }
     }
-    // Strip VLAN tags
     let vlanStrips=0;
     while ((etherType===0x8100||etherType===0x88A8||etherType===0x9100) && vlanStrips<3) {
       if (ipStart+4>cap) break;
       etherType=dv.getUint16(ipStart+2,false); ipStart+=4; vlanStrips++;
     }
-    // PPPoE
     if (etherType===0x8864 && ipStart+8<=cap) {
       const pppProto=dv.getUint16(ipStart+6,false);
       if (pppProto===0x0021) etherType=0x0800; else if(pppProto===0x0057) etherType=0x86DD;
       ipStart+=8;
     }
-    // LLC/SNAP
     if (etherType<=1500 && ipStart+8<=cap) {
       const dsap=dv.getUint8(ipStart), ssap=dv.getUint8(ipStart+1);
       if (dsap===0xAA&&ssap===0xAA) { etherType=dv.getUint16(ipStart+6,false); ipStart+=8; }
@@ -529,7 +564,7 @@ async function streamLoop() {
       if (value) {
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
-        buffer = lines.pop(); // Hold onto the last incomplete line
+        buffer = lines.pop(); 
         let structural = false, legend = false;
         
         lines.forEach(line => {
@@ -573,13 +608,15 @@ async function connectWebSerial() {
     serialPort = await navigator.serial.requestPort();
     await serialPort.open({ baudRate: 921600 });
 
+    initUI();
+    await loadOUIDatabase();
+
     setSerialStatus('Rebooting ESP32 via DTR/RTS…', '#d4a017');
     await serialPort.setSignals({ dataTerminalReady: false, requestToSend: false });
     await new Promise(r=>setTimeout(r,100));
     await serialPort.setSignals({ dataTerminalReady: true, requestToSend: true });
     await new Promise(r=>setTimeout(r,500));
 
-    initUI();
     timeStatus.textContent='LIVE';
     timeStatus.style.color='#d4a017';
     setSerialStatus('Waiting for PCAPNG magic…', '#d4a017');
@@ -599,8 +636,6 @@ async function streamPCAPNG(port) {
   let le = true;          
   let linkType = 1;        
   let bytesCapured = 0;
-
-  const PCAPNG_MAGIC = [0x0A, 0x0D, 0x0D, 0x0A];
 
   function concat(a, b) {
     const c = new Uint8Array(a.length + b.length);
@@ -637,9 +672,8 @@ async function streamPCAPNG(port) {
       } else if (blockType === 0x00000001) {
         linkType = bDV.getUint16(8, le);
       } else if (blockType === 0x00000006) {
-        // Enhanced Packet Block
         const capLen2 = bDV.getUint32(20, le);
-        const pktOffset = 28; // <--- Corrected offset for EPB raw data
+        const pktOffset = 28; 
 
         if (pktOffset + capLen2 <= blockLen) {
           const r = parseEthernetFrame(bDV, pktOffset, capLen2, linkType, blockLen);
@@ -714,20 +748,32 @@ async function disconnectSerial() {
 
 // ─── Button Handlers ───────────────────────────────────────────────────────────
 document.getElementById('btnPicker').onclick = async () => {
-  try { [fileHandle] = await window.showOpenFilePicker(); initUI(); streamLoop(); } catch(e){}
+  try { 
+    [fileHandle] = await window.showOpenFilePicker(); 
+    initUI(); 
+    await loadOUIDatabase();
+    streamLoop(); 
+  } catch(e){}
 };
+
 document.getElementById('btnPcap').onclick = async () => {
   try {
     [fileHandle] = await window.showOpenFilePicker({ types:[{description:'PCAP Files',accept:{'application/vnd.tcpdump.pcap':['.pcap','.cap']}}] });
-    initUI(); processStaticPCAP();
+    initUI(); 
+    await loadOUIDatabase();
+    processStaticPCAP();
   } catch(e){}
 };
+
 document.getElementById('btnStatic').onclick = async () => {
   try {
     [fileHandle] = await window.showOpenFilePicker({ types:[{description:'CSV Files',accept:{'text/csv':['.csv']}}] });
-    initUI(); processStaticCSV();
+    initUI(); 
+    await loadOUIDatabase();
+    processStaticCSV();
   } catch(e){}
 };
+
 document.getElementById('btnSerial').onclick = connectWebSerial;
 
 window.addEventListener('resize', () => {
