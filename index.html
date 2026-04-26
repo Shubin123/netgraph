@@ -79,12 +79,12 @@ button:active { transform: scale(0.98); }
   <h1>&#x2B21; Network Map Engine</h1>
   <div class="btn-container">
     <button id="btnPicker">&#x1F4C2; Open Live stream.ndjson</button>
-    <button id="btnPcap">&#x1F988; Parse PCAP File</button>
+    <button id="btnPcap">&#x1F988; Parse PCAP / PCAPNG</button>
     <button id="btnStatic">&#x1F4CA; Review Wireshark (CSV)</button>
     <button id="btnSerial">&#x1F4E1; ESP32 WebSerial (PCAPNG)</button>
   </div>
   <p class="hint-text">
-    Supports <b>.pcap / .cap</b> (native binary parsing with VLAN support), structured <b>.csv / .ndjson</b>, and live <b>ESP32 capture via WebSerial</b> (PCAPNG stream).<br>
+    Supports <b>.pcap / .cap / .pcapng</b> (native binary parsing with VLAN support), structured <b>.csv / .ndjson</b>, and live <b>ESP32 capture via WebSerial</b> (PCAPNG stream).<br>
     <i>Note: Ethernet link layer assumed for PCAP. PCAPNG streamed from ESP32 via 921600 baud.</i>
   </p>
 </div>
@@ -471,52 +471,114 @@ function setProgress(pct, label) {
   if (pct>=100) setTimeout(()=>{ wrap.style.display='none'; },400);
 }
 
-// ─── PCAP File Parser ──────────────────────────────────────────────────────────
+// ─── PCAP / PCAPNG File Parser ────────────────────────────────────────────────
 async function processStaticPCAP() {
   try {
     const file = await fileHandle.getFile();
     const arrayBuffer = await file.arrayBuffer();
     const dv = new DataView(arrayBuffer);
     const total = arrayBuffer.byteLength;
-    if (total<24) throw new Error("File too small");
-    const magic=dv.getUint32(0,true);
-    let le;
-    if (magic===0xa1b2c3d4||magic===0xa1b23c4d) le=true;
-    else if (magic===0xd4c3b2a1||magic===0x4d3cb2a1) le=false;
-    else { alert('Invalid PCAP: unknown magic'); return; }
-    const linkType=dv.getUint32(20,le);
-    let offset=24, structural=false, legend=false, packetCount=0;
-    const CHUNK=2500;
-    setProgress(0,'Starting PCAP Parse\u2026');
-    while (offset<total) {
-      let done=0;
-      while (offset<total && done<CHUNK) {
-        if (offset+16>total) break;
-        const inclLen=dv.getUint32(offset+8,le);
-        const pktStart=offset+16;
-        offset=pktStart+inclLen; done++; packetCount++;
-        if (offset>total||inclLen===0) continue;
-        const r=parseEthernetFrame(dv,pktStart,inclLen,linkType,total);
-        if (r) {
-          const c=processPacketData(r.src,r.dst,r.proto);
-          if(c.structuralChange) structural=true;
-          if(c.legendChanged)    legend=true;
+    if (total < 24) throw new Error("File too small");
+
+    const magic = dv.getUint32(0, true);
+    const isPcapng = (magic === 0x0A0D0D0A); // Section Header Block magic
+    
+    let offset = 0;
+    let le = true;
+    let linkType = 1;
+    let structural = false, legend = false, packetCount = 0;
+    const CHUNK = 2500;
+
+    setProgress(0, isPcapng ? 'Starting PCAPNG Parse\u2026' : 'Starting PCAP Parse\u2026');
+
+    // Legacy PCAP Header Initialization
+    if (!isPcapng) {
+      if (magic === 0xa1b2c3d4 || magic === 0xa1b23c4d) le = true;
+      else if (magic === 0xd4c3b2a1 || magic === 0x4d3cb2a1) le = false;
+      else { alert('Invalid PCAP/PCAPNG: unknown magic'); return; }
+      linkType = dv.getUint32(20, le);
+      offset = 24;
+    }
+
+    while (offset < total) {
+      let done = 0;
+      while (offset < total && done < CHUNK) {
+        if (isPcapng) {
+          // --- PCAPNG Block Parsing ---
+          if (offset + 8 > total) break;
+          const blockType = dv.getUint32(offset, le);
+          let blockLen = dv.getUint32(offset + 4, le);
+
+          if (blockType === 0x0A0D0D0A) { // Section Header Block
+            const bom = dv.getUint32(offset + 8, true);
+            le = (bom === 0x1A2B3C4D);
+            blockLen = dv.getUint32(offset + 4, le); // Re-read length with correct endianness
+          } else if (blockType === 0x00000001) { // Interface Description Block
+            linkType = dv.getUint16(offset + 8, le);
+          } else if (blockType === 0x00000006) { // Enhanced Packet Block
+            const capLen2 = dv.getUint32(offset + 20, le);
+            const pktOffset = offset + 28;
+            if (pktOffset + capLen2 <= offset + blockLen) {
+              const r = parseEthernetFrame(dv, pktOffset, capLen2, linkType, total);
+              if (r) {
+                const c = processPacketData(r.src, r.dst, r.proto);
+                if (c.structuralChange) structural = true;
+                if (c.legendChanged) legend = true;
+              }
+              packetCount++; done++;
+            }
+          } else if (blockType === 0x00000003) { // Simple Packet Block
+            const origLen = dv.getUint32(offset + 8, le);
+            const pktData = blockLen - 16;
+            const capLen = Math.min(origLen, pktData);
+            if (capLen > 0 && offset + 12 + capLen <= offset + blockLen) {
+              const r = parseEthernetFrame(dv, offset + 12, capLen, linkType, total);
+              if (r) {
+                const c = processPacketData(r.src, r.dst, r.proto);
+                if (c.structuralChange) structural = true;
+                if (c.legendChanged) legend = true;
+              }
+              packetCount++; done++;
+            }
+          }
+          
+          if (blockLen < 12) { offset = total; break; } // Corrupt block prevention
+          offset += blockLen;
+          
+        } else {
+          // --- Legacy PCAP Frame Parsing ---
+          if (offset + 16 > total) break;
+          const inclLen = dv.getUint32(offset + 8, le);
+          const pktStart = offset + 16;
+          offset = pktStart + inclLen; 
+          packetCount++; done++;
+          if (offset > total || inclLen === 0) continue;
+          
+          const r = parseEthernetFrame(dv, pktStart, inclLen, linkType, total);
+          if (r) {
+            const c = processPacketData(r.src, r.dst, r.proto);
+            if (c.structuralChange) structural = true;
+            if (c.legendChanged) legend = true;
+          }
         }
       }
-      if (offset<total) {
-        setProgress(Math.min(99,Math.round((offset/total)*100)),`Parsing PCAP\u2026 ${packetCount.toLocaleString()} packets`);
-        await new Promise(r=>setTimeout(r,0));
+      
+      if (offset < total) {
+        setProgress(Math.min(99, Math.round((offset / total) * 100)), `Parsing ${isPcapng ? 'PCAPNG' : 'PCAP'}\u2026 ${packetCount.toLocaleString()} packets`);
+        await new Promise(r => setTimeout(r, 0));
       }
     }
+    
     setProgress(100);
-    isLive=false;
-    timeSlider.max=globalPacketIndex; timeSlider.value=globalPacketIndex;
-    timeStatus.textContent='PCAP'; timeStatus.style.color='#8957e5';
-    if(legend) updateLegend();
+    isLive = false;
+    timeSlider.max = globalPacketIndex; timeSlider.value = globalPacketIndex;
+    timeStatus.textContent = isPcapng ? 'PCAPNG' : 'PCAP'; 
+    timeStatus.style.color = '#8957e5';
+    if (legend) updateLegend();
     updateGraph();
   } catch(err) {
-    document.getElementById('progress-bar-wrap').style.display='none';
-    alert('Failed to parse PCAP: '+err.message);
+    document.getElementById('progress-bar-wrap').style.display = 'none';
+    alert('Failed to parse capture file: ' + err.message);
   }
 }
 
@@ -758,11 +820,16 @@ document.getElementById('btnPicker').onclick = async () => {
 
 document.getElementById('btnPcap').onclick = async () => {
   try {
-    [fileHandle] = await window.showOpenFilePicker({ types:[{description:'PCAP Files',accept:{'application/vnd.tcpdump.pcap':['.pcap','.cap']}}] });
+    [fileHandle] = await window.showOpenFilePicker({ 
+      types: [{
+        description: 'Capture Files',
+        accept: { 'application/vnd.tcpdump.pcap': ['.pcap', '.cap', '.pcapng'] }
+      }] 
+    });
     initUI(); 
     await loadOUIDatabase();
     processStaticPCAP();
-  } catch(e){}
+  } catch(e) {}
 };
 
 document.getElementById('btnStatic').onclick = async () => {
