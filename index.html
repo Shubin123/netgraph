@@ -69,7 +69,8 @@ button:active { transform: scale(0.98); }
 .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
 
 .link { stroke: #30363d; stroke-width: 1.5; opacity: 0.4; }
-.node circle { stroke-width: 1.5; cursor: grab; }
+.node circle.core { stroke-width: 1.5; cursor: grab; }
+.node circle.ping, .node circle.halo { pointer-events: none; }
 .node text { font-size: 10px; fill: #8b949e; pointer-events: none; text-shadow: 0 1px 3px #000; }
 </style>
 </head>
@@ -193,6 +194,24 @@ const bisectHistory = d3.bisector(d => d.index).right;
 const svg = d3.select('#svg');
 const W = () => window.innerWidth, H = () => window.innerHeight;
 svg.attr('width', W()).attr('height', H());
+
+// Soft "glow" halos built as radial gradients — one per protocol color, created
+// lazily and reused. Gradients are rasterized once; unlike a per-node feGaussianBlur
+// filter they cost nothing extra as the simulation moves nodes every frame.
+const defs = svg.append('defs');
+const glowIds = new Set();
+function glowFill(color) {
+  const id = 'glow' + color.replace('#', '');
+  if (!glowIds.has(id)) {
+    glowIds.add(id);
+    const grad = defs.append('radialGradient').attr('id', id);
+    grad.append('stop').attr('offset', '0%').attr('stop-color', color).attr('stop-opacity', 0.55);
+    grad.append('stop').attr('offset', '55%').attr('stop-color', color).attr('stop-opacity', 0.18);
+    grad.append('stop').attr('offset', '100%').attr('stop-color', color).attr('stop-opacity', 0);
+  }
+  return `url(#${id})`;
+}
+
 const g = svg.append('g');
 const gLinks = g.append('g'), gNodes = g.append('g');
 
@@ -210,6 +229,15 @@ const sim = d3.forceSimulation()
   });
 
 // ─── Graph Update ──────────────────────────────────────────────────────────────
+// Live captures can fire thousands of packets/sec; coalesce all of them into at
+// most one redraw per animation frame so ingestion rate never outruns the GPU.
+let updateQueued = false;
+function scheduleUpdate() {
+  if (updateQueued) return;
+  updateQueued = true;
+  requestAnimationFrame(() => { updateQueued = false; updateGraph(); });
+}
+
 function updateGraph() {
   const currentLimit = parseInt(document.getElementById('timeSlider').value);
   document.getElementById('pc').textContent = currentLimit;
@@ -217,8 +245,11 @@ function updateGraph() {
   const activeNodeIds = new Set();
   nodes.forEach(n => {
     const splitIndex = bisectHistory(n.history, currentLimit);
+    const prevCount = n.currentCount || 0;
     n.currentCount = splitIndex;
     if (n.currentCount === 0) return;
+    // Already on screen and just saw new packets → flag it to "light up" this frame.
+    n.justActivated = prevCount > 0 && splitIndex > prevCount;
     n.displayProto = n.history[splitIndex - 1].proto;
     if (!activeFilter) {
       activeNodes.push(n); activeNodeIds.add(n.id);
@@ -237,23 +268,75 @@ function updateGraph() {
     return true;
   });
   const link = gLinks.selectAll('line').data(activeEdges, d => d.id);
-  link.enter().append('line').attr('class', 'link');
+  link.enter().append('line').attr('class', 'link')
+    .style('opacity', 0).transition().duration(700).style('opacity', 0.4);
   link.exit().remove();
   const node = gNodes.selectAll('.node').data(activeNodes, d => d.id);
+  // Above this size, skip the per-node entrance/flash transitions — they'd spawn
+  // thousands of concurrent tweens and tank the frame rate. The glow + grow still read.
+  const lite = activeNodes.length > 250;
   const ne = node.enter().append('g').attr('class', 'node')
     .call(d3.drag()
       .on('start', (e, d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
       .on('drag',  (e, d) => { d.fx = e.x; d.fy = e.y; })
       .on('end',   (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
-  ne.append('circle')
-    .attr('r', d => getRadius(d))
+
+  // Soft glow halo behind the body — a cheap gradient-filled disc (no SVG filter).
+  ne.append('circle').attr('class', 'halo')
+    .attr('fill', d => glowFill(colorScale(d.displayProto)))
+    .attr('r', d => getRadius(d) * 2.2);
+
+  // Expanding "radar ping" ring — fires once as a node first materializes.
+  if (!lite) {
+    ne.append('circle').attr('class', 'ping')
+      .attr('fill', 'none')
+      .attr('stroke', d => colorScale(d.displayProto))
+      .attr('stroke-width', 2.5)
+      .attr('r', d => getRadius(d))
+      .style('opacity', 0.9)
+      .transition().duration(900).ease(d3.easeCubicOut)
+        .attr('r', d => getRadius(d) * 3.2)
+        .attr('stroke-width', 0.3)
+        .style('opacity', 0)
+        .remove();
+  }
+
+  // Main node body — pops in with an elastic bounce (or appears instantly when lite).
+  const core = ne.append('circle').attr('class', 'core')
     .attr('fill', d => colorScale(d.displayProto) + '44')
     .attr('stroke', d => colorScale(d.displayProto));
-  ne.append('text').attr('dy', 22).attr('text-anchor', 'middle').text(d => d.id);
-  node.select('circle').transition().duration(300)
+  if (lite) {
+    core.attr('r', d => getRadius(d));
+  } else {
+    core.attr('r', 0).style('opacity', 0)
+      .transition().duration(650).ease(d3.easeElasticOut.amplitude(1).period(0.55))
+        .attr('r', d => getRadius(d))
+        .style('opacity', 1);
+  }
+
+  ne.append('text').attr('dy', 22).attr('text-anchor', 'middle').text(d => d.id)
+    .style('opacity', lite ? 1 : 0);
+  if (!lite) ne.select('text').transition().delay(180).duration(500).style('opacity', 1);
+
+  // Keep the glow halo sized with its node (cheap attr write, no transition).
+  node.select('circle.halo')
+    .attr('r', d => getRadius(d) * 2.2)
+    .attr('fill', d => glowFill(colorScale(d.displayProto)));
+
+  const coreUpd = node.select('circle.core');
+  (lite ? coreUpd : coreUpd.transition().duration(300))
     .attr('r', getRadius)
     .attr('fill', d => colorScale(d.displayProto) + '44')
     .attr('stroke', d => colorScale(d.displayProto));
+
+  // Activity flash — on-screen nodes briefly brighten when fresh packets arrive.
+  // Named 'flash' transition runs alongside (not cancelling) the radius tween.
+  if (!lite) {
+    node.filter(d => d.justActivated).select('circle.core')
+      .transition('flash').duration(110).ease(d3.easeQuadOut).attr('stroke-width', 4.5)
+      .transition('flash').duration(420).ease(d3.easeQuadIn).attr('stroke-width', 1.5);
+  }
+
   node.exit().remove();
   sim.nodes(activeNodes);
   sim.force('link').links(activeEdges);
@@ -641,7 +724,7 @@ async function streamLoop() {
         
         timeSlider.max = globalPacketIndex;
         if(legend) updateLegend();
-        if(isLive){ timeSlider.value = globalPacketIndex; if(structural) updateGraph(); }
+        if(isLive){ timeSlider.value = globalPacketIndex; if(structural) scheduleUpdate(); }
       }
       if (done) break;
     }
@@ -768,7 +851,7 @@ async function streamPCAPNG(port) {
     if (legendChanged) updateLegend();
     if (isLive && structural) {
       timeSlider.value = globalPacketIndex;
-      updateGraph();
+      scheduleUpdate();
     }
     setSerialStatus(`Serial LIVE — ${globalPacketIndex.toLocaleString()} pkts | ${(bytesCapured/1024).toFixed(1)} KB`, '#3fb950');
   }
