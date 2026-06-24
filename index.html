@@ -60,7 +60,7 @@ button:active { transform: scale(0.98); }
 #timeStatus { font-size: 12px; font-weight: bold; color: #3fb950; min-width: 60px; text-align: right; }
 
 #legend {
-  position: fixed; top: 14px; right: 16px; font-size: 12px; color: #8b949e;
+  position: fixed; top: 14px; right: 16px; z-index: 10; font-size: 12px; color: #8b949e;
   background: rgba(13,17,23,0.85); padding: 12px; border-radius: 8px; border: 1px solid #30363d; display: none; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
   max-height: 90vh; overflow-y: auto;
 }
@@ -297,7 +297,10 @@ function drawCanvas() {
   ctx.scale(view.k, view.k);
 
   // Viewport bounds in graph coords (+margin) so off-screen elements are skipped entirely.
-  const m = 80 / view.k;
+  // The margin is a CONSTANT in graph space (not zoom-scaled): a glow halo spans up to
+  // getRadius·2.2 = 45·2.2 ≈ 99 graph units, so a node whose center is just off-screen can
+  // still have visible glow. Keep ≥99 here or edge glows pop in/out while panning/zooming.
+  const m = 110;
   const x0 = -view.x / view.k - m, y0 = -view.y / view.k - m;
   const x1 = (w - view.x) / view.k + m, y1 = (h - view.y) / view.k + m;
 
@@ -367,9 +370,11 @@ function setupCanvasInteraction() {
     // Returning null when no node is under the pointer makes d3-drag NOT start a gesture,
     // so the press falls through to the zoom behavior and pans the background instead.
     .subject(ev => nodeAt(ev.sourceEvent.clientX, ev.sourceEvent.clientY))
-    .on('start', ev => { if (!ev.active) sim.alphaTarget(0.3).restart(); ev.subject.fx = ev.subject.x; ev.subject.fy = ev.subject.y; })
-    .on('drag',  ev => { const [gx, gy] = screenToGraph(ev.sourceEvent.clientX, ev.sourceEvent.clientY); ev.subject.fx = gx; ev.subject.fy = gy; })
-    .on('end',   ev => { if (!ev.active) sim.alphaTarget(0); ev.subject.fx = null; ev.subject.fy = null; }));
+    // d3-drag won't start a gesture when subject is null, but guard anyway so a stray event
+    // (or a subject removed mid-drag by a filter/timeline change) can never throw.
+    .on('start', ev => { if (!ev.active) sim.alphaTarget(0.3).restart(); if (ev.subject) { ev.subject.fx = ev.subject.x; ev.subject.fy = ev.subject.y; } })
+    .on('drag',  ev => { if (ev.subject) { const [gx, gy] = screenToGraph(ev.sourceEvent.clientX, ev.sourceEvent.clientY); ev.subject.fx = gx; ev.subject.fy = gy; } })
+    .on('end',   ev => { if (!ev.active) sim.alphaTarget(0); if (ev.subject) { ev.subject.fx = null; ev.subject.fy = null; } }));
 }
 
 function setRenderMode(m) {
