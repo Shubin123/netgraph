@@ -1,0 +1,34 @@
+{
+  "ts": "2026-06-24T18:05:14.868Z",
+  "label": "verify",
+  "capture": "synthetic.pcap",
+  "captureMB": 13.8,
+  "nodes": 2000,
+  "edges": 15520,
+  "packets": 250000,
+  "parseMs": 949.5,
+  "settled": true,
+  "settleMs": 1835,
+  "load": {
+    "frames": 167,
+    "meanFps": 59.99856290867288,
+    "p95": 16.799999999999955,
+    "worst": 17.600000000000136,
+    "firstRenderMs": 13,
+    "ticksRun": 168,
+    "tickAvg": 0.6053571428554798,
+    "longTasks": 0,
+    "longMax": 0,
+    "longTotal": 0,
+    "heapMB": 64.849853515625
+  },
+  "bench": {
+    "ticks": 80,
+    "avg": 5.235000000000582,
+    "p50": 5.199999999953434,
+    "p95": 6.100000000093132,
+    "max": 6.699999999953434,
+    "over16": 0,
+    "projFps": 191.02196752624428
+  }
+}

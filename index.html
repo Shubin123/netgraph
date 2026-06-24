@@ -68,6 +68,7 @@ button:active { transform: scale(0.98); }
 .legend-item:hover { color: #e6edf3; }
 .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
 
+#cv { position: fixed; inset: 0; z-index: 1; display: none; }
 .link { stroke: #30363d; stroke-width: 1.5; opacity: 0.4; }
 .node circle.core { stroke-width: 1.5; cursor: grab; }
 .node circle.ping, .node circle.halo { pointer-events: none; }
@@ -113,6 +114,7 @@ button:active { transform: scale(0.98); }
   <div id="timeStatus">LIVE</div>
 </div>
 
+<canvas id="cv"></canvas>
 <svg id="svg"></svg>
 
 <script>
@@ -222,6 +224,7 @@ const sim = d3.forceSimulation()
   .force('charge', d3.forceManyBody().strength(-200))
   .force('center', d3.forceCenter(W()/2, H()/2))
   .on('tick', () => {
+    if (renderMode === 'canvas') { drawCanvas(); return; }
     gLinks.selectAll('line')
       .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
       .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
@@ -236,6 +239,153 @@ function scheduleUpdate() {
   if (updateQueued) return;
   updateQueued = true;
   requestAnimationFrame(() => { updateQueued = false; updateGraph(); });
+}
+
+// ─── Canvas Renderer (large-graph fast path) ───────────────────────────────────
+// SVG is gorgeous, but every force tick re-lays-out one DOM element per node AND per
+// edge; past a few hundred elements that reflow is the entire frame budget (the harness
+// shows edges dominate — 8× the <line>s ⇒ 4.5× the tick cost). Above the thresholds
+// below we move the heavy layers onto a single <canvas>: all links collapse into one
+// batched path (they share a color), nodes become cheap arc()/drawImage() calls, and the
+// DOM stops mutating entirely. Everything is viewport-culled, so cost scales with what's
+// actually ON SCREEN, not with the total graph size — and a settled (idle) graph is free.
+// Small graphs keep the full SVG treatment (entrance pops, ping rings, activity flashes).
+const HEAVY_NODES = 600, HEAVY_EDGES = 1200;
+const canvasEl = document.getElementById('cv');
+const ctx = canvasEl.getContext('2d');
+let DPR = 1;
+let renderMode = 'svg';
+let renderNodes = [], renderEdges = [];
+const labelBuf = [];   // reused across frames so a smooth 60fps redraw allocates nothing
+let view = d3.zoomIdentity;
+let canvasZoom = null, canvasReady = false;
+
+function sizeCanvas() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);  // cap DPR: 3× retina triples fill cost for no visible gain
+  canvasEl.width  = Math.round(W() * DPR);
+  canvasEl.height = Math.round(H() * DPR);
+  canvasEl.style.width  = W() + 'px';
+  canvasEl.style.height = H() + 'px';
+}
+
+// Per-color draw state built once and reused: solid stroke, translucent fill, and a
+// pre-rasterized radial-gradient glow sprite. Creating a gradient per node per frame
+// would dominate the budget; blitting a cached 128px sprite costs ~nothing.
+const colorState = (() => {
+  const cache = new Map();
+  const rgba = (hex, a) => { const v = parseInt(hex.slice(1), 16); return `rgba(${(v>>16)&255},${(v>>8)&255},${v&255},${a})`; };
+  return color => {
+    let s = cache.get(color);
+    if (s) return s;
+    const S = 128, spr = document.createElement('canvas'); spr.width = spr.height = S;
+    const sc = spr.getContext('2d');
+    const grad = sc.createRadialGradient(S/2, S/2, 0, S/2, S/2, S/2);
+    grad.addColorStop(0, rgba(color, 0.55)); grad.addColorStop(0.55, rgba(color, 0.18)); grad.addColorStop(1, rgba(color, 0));
+    sc.fillStyle = grad; sc.fillRect(0, 0, S, S);
+    s = { stroke: color, fill: rgba(color, 0.27), glow: spr };
+    cache.set(color, s);
+    return s;
+  };
+})();
+
+function drawCanvas() {
+  if (renderMode !== 'canvas') return;
+  const w = W(), h = H();
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  ctx.translate(view.x, view.y);
+  ctx.scale(view.k, view.k);
+
+  // Viewport bounds in graph coords (+margin) so off-screen elements are skipped entirely.
+  const m = 80 / view.k;
+  const x0 = -view.x / view.k - m, y0 = -view.y / view.k - m;
+  const x1 = (w - view.x) / view.k + m, y1 = (h - view.y) / view.k + m;
+
+  // Links — one batched path (all share #30363d @ 0.4), viewport-culled.
+  ctx.lineWidth = 1.5; ctx.globalAlpha = 0.4; ctx.strokeStyle = '#30363d';
+  ctx.beginPath();
+  for (let i = 0; i < renderEdges.length; i++) {
+    const e = renderEdges[i], sx = e.source.x, sy = e.source.y, tx = e.target.x, ty = e.target.y;
+    if ((sx < x0 && tx < x0) || (sx > x1 && tx > x1) || (sy < y0 && ty < y0) || (sy > y1 && ty > y1)) continue;
+    ctx.moveTo(sx, sy); ctx.lineTo(tx, ty);
+  }
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+
+  // Nodes — cached glow sprite + core disc, viewport-culled. Collect on-screen nodes for
+  // labelling only when labels will actually be drawn (zoomed out is the common heavy case,
+  // where we push nothing), reusing labelBuf so a steady 60fps redraw stays allocation-free.
+  const wantLabels = view.k > 0.55;
+  labelBuf.length = 0;
+  for (let i = 0; i < renderNodes.length; i++) {
+    const d = renderNodes[i];
+    if (d.x < x0 || d.x > x1 || d.y < y0 || d.y > y1) continue;
+    const r = getRadius(d), cs = colorState(colorScale(d.displayProto)), gr = r * 2.2;
+    ctx.drawImage(cs.glow, d.x - gr, d.y - gr, gr * 2, gr * 2);
+    ctx.beginPath(); ctx.arc(d.x, d.y, r, 0, 6.283185307179586);
+    ctx.fillStyle = cs.fill; ctx.fill();
+    ctx.lineWidth = 1.5; ctx.strokeStyle = cs.stroke; ctx.stroke();
+    if (wantLabels) labelBuf.push(d);
+  }
+
+  // Labels — only when readable: zoomed in enough and not a dense unreadable blob.
+  if (wantLabels && labelBuf.length <= 400) {
+    ctx.fillStyle = '#8b949e'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = '10px system-ui, sans-serif';
+    for (let i = 0; i < labelBuf.length; i++) { const d = labelBuf[i]; ctx.fillText(d.id, d.x, d.y + getRadius(d) + 12); }
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+}
+
+const screenToGraph = (px, py) => [(px - view.x) / view.k, (py - view.y) / view.k];
+function nodeAt(px, py) {
+  const [gx, gy] = screenToGraph(px, py);
+  let best = null, bd = Infinity;
+  for (let i = 0; i < renderNodes.length; i++) {
+    const n = renderNodes[i], dx = n.x - gx, dy = n.y - gy, d2 = dx*dx + dy*dy, rr = getRadius(n) + 6;
+    if (d2 <= rr*rr && d2 < bd) { bd = d2; best = n; }
+  }
+  return best;
+}
+
+function setupCanvasInteraction() {
+  if (canvasReady) return;
+  canvasReady = true;
+  const sel = d3.select(canvasEl);
+  canvasZoom = d3.zoom().scaleExtent([0.03, 8])
+    .filter(ev => {
+      // A press that lands on a node belongs to the drag behavior, not to panning.
+      if (ev.type === 'mousedown' || ev.type === 'pointerdown' || ev.type === 'touchstart') {
+        const t = ev.touches ? ev.touches[0] : ev;
+        return !nodeAt(t.clientX, t.clientY);
+      }
+      return (!ev.ctrlKey || ev.type === 'wheel') && !ev.button;
+    })
+    .on('zoom', ev => { view = ev.transform; drawCanvas(); });
+  sel.call(canvasZoom);
+  sel.call(d3.drag()
+    // Returning null when no node is under the pointer makes d3-drag NOT start a gesture,
+    // so the press falls through to the zoom behavior and pans the background instead.
+    .subject(ev => nodeAt(ev.sourceEvent.clientX, ev.sourceEvent.clientY))
+    .on('start', ev => { if (!ev.active) sim.alphaTarget(0.3).restart(); ev.subject.fx = ev.subject.x; ev.subject.fy = ev.subject.y; })
+    .on('drag',  ev => { const [gx, gy] = screenToGraph(ev.sourceEvent.clientX, ev.sourceEvent.clientY); ev.subject.fx = gx; ev.subject.fy = gy; })
+    .on('end',   ev => { if (!ev.active) sim.alphaTarget(0); ev.subject.fx = null; ev.subject.fy = null; }));
+}
+
+function setRenderMode(m) {
+  if (m === renderMode) return;
+  renderMode = m;
+  if (m === 'canvas') {
+    gLinks.selectAll('*').remove();   // drop the SVG layers we're replacing so they stop reflowing
+    gNodes.selectAll('*').remove();
+    view = d3.zoomTransform(svg.node());   // inherit any pan/zoom from the SVG phase
+    sizeCanvas();
+    canvasEl.style.display = 'block';
+    setupCanvasInteraction();
+    if (canvasZoom) d3.select(canvasEl).call(canvasZoom.transform, view);
+  } else {
+    canvasEl.style.display = 'none';
+  }
 }
 
 function updateGraph() {
@@ -267,6 +417,21 @@ function updateGraph() {
     if (activeFilter && e.proto !== activeFilter) return false;
     return true;
   });
+
+  // Pick the render path from the FULL graph size (sticky — nodes.size only grows — so the
+  // timeline scrubbing the active set smaller never thrashes us back and forth between modes).
+  setRenderMode(nodes.size > HEAVY_NODES || edges.size > HEAVY_EDGES ? 'canvas' : 'svg');
+
+  if (renderMode === 'canvas') {
+    // With rendering off the critical path (canvas draw is ~1ms even at 15k edges), the
+    // n·log n Barnes-Hut charge force IS the per-tick cost at scale. Open its approximation
+    // angle (theta) with node count: small canvas graphs keep d3's accurate 0.9, but a 10k+
+    // node graph needs ~1.8 to stay near 60fps — and at that zoom the coarser node spacing
+    // is imperceptible. The SVG path (small graphs) keeps the pristine default untouched.
+    sim.force('charge').theta(nodes.size <= 2500 ? 0.9 : Math.min(2.0, 0.9 + (nodes.size - 2500) / 7500 * 0.9));
+  }
+
+  if (renderMode === 'svg') {
   const link = gLinks.selectAll('line').data(activeEdges, d => d.id);
   link.enter().append('line').attr('class', 'link')
     .style('opacity', 0).transition().duration(700).style('opacity', 0.4);
@@ -338,11 +503,38 @@ function updateGraph() {
   }
 
   node.exit().remove();
+  } // end SVG render path
+
   sim.nodes(activeNodes);
   sim.force('link').links(activeEdges);
   if (sim.alpha() < 0.05) sim.alpha(0.05).restart();
   document.getElementById('nc').textContent = activeNodes.length;
   document.getElementById('ec').textContent = activeEdges.length;
+
+  // Hand the current active set to the canvas renderer and paint one frame immediately
+  // (so legend filters / timeline scrubs are reflected even when the sim is already at rest).
+  renderNodes = activeNodes; renderEdges = activeEdges;
+  if (renderMode === 'canvas') drawCanvas();
+}
+
+// ─── Initial Node Placement ─────────────────────────────────────────────────────
+// Spawning every node on the exact same point (W/2,H/2, or precisely on its peer) makes
+// forceManyBody's Barnes-Hut quadtree degenerate — thousands of coincident points cause
+// multi-second "startup hitch" ticks when a large capture loads. Spread them instead:
+// first-seen nodes go on a phyllotaxis spiral (area grows with the node count, like d3's
+// own default), and peer-linked nodes land in a ring around the peer — close enough to
+// read as connected, but never coincident.
+const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+let spawnIndex = 0;
+function initialPosition(peer) {
+  const i = spawnIndex++;
+  const a = i * GOLDEN_ANGLE;
+  if (peer) {
+    return { x: peer.x + Math.cos(a) * 24 + (Math.random() - 0.5) * 8,
+             y: peer.y + Math.sin(a) * 24 + (Math.random() - 0.5) * 8 };
+  }
+  const r = 18 * Math.sqrt(i);
+  return { x: W() / 2 + Math.cos(a) * r, y: H() / 2 + Math.sin(a) * r };
 }
 
 // ─── Shared Packet Ingestion ───────────────────────────────────────────────────
@@ -358,7 +550,8 @@ function processPacketData(rawSrc, rawDst, proto) {
   [src, dst].forEach(id => {
     if (!nodes.has(id)) {
       const peer = nodes.get(id === src ? dst : src);
-      nodes.set(id, { id, history: [{ index: globalPacketIndex, proto }], x: peer ? peer.x : W()/2, y: peer ? peer.y : H()/2 });
+      const pos = initialPosition(peer);
+      nodes.set(id, { id, history: [{ index: globalPacketIndex, proto }], x: pos.x, y: pos.y });
       structuralChange = true;
     } else {
       nodes.get(id).history.push({ index: globalPacketIndex, proto });
@@ -928,6 +1121,8 @@ document.getElementById('btnSerial').onclick = connectWebSerial;
 
 window.addEventListener('resize', () => {
   svg.attr('width', W()).attr('height', H());
+  sizeCanvas();
+  if (renderMode === 'canvas') drawCanvas();
   sim.force('center', d3.forceCenter(W()/2, H()/2)).alpha(0.1).restart();
 });
 </script>
