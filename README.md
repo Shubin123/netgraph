@@ -22,3 +22,6 @@ fuzz-2006-07-05-6279.pcap
 
 randpkt-2020-09-06-16170.pcap
 <img width="1630" height="718" alt="image" src="https://github.com/user-attachments/assets/f39db83c-7d12-4c6d-b39c-716d9817af18" />
+
+
+using puppeteer for auto testing

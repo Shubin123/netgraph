@@ -1,0 +1,18 @@
+{
+  "name": "netgraph-perf",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Automated frame-drop / rendering perf harness for netgraph/index.html",
+  "scripts": {
+    "measure": "node measure.mjs --label 13403",
+    "measure:big": "node measure.mjs --capture ../fuzz-2006-08-23-6489.pcap --label 6489",
+    "measure:synthetic": "node gen-pcap.js && node measure.mjs --capture synthetic.pcap --label synthetic",
+    "compare": "node compare.mjs",
+    "gen": "node gen-pcap.js",
+    "bench": "npm run measure && npm run measure:big"
+  },
+  "dependencies": {
+    "puppeteer-core": "^23.0.0"
+  }
+}
