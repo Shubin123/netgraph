@@ -21,9 +21,9 @@ clean synthetic file):
 
 | file | size | parses to | settles? |
 |------|-----:|-----------|----------|
-| `../fuzz-2006-07-09-13403.pcap` | 2.4 MB | 1,467 nodes / 1,898 edges | yes, ~8 s (default — start here) |
-| `../fuzz-2006-08-23-6489.pcap`  | 7.3 MB | (bigger) | — |
-| `synthetic.pcap` (generated)    | tunable | ~2k nodes / 15.5k edges | deliberately extreme stress |
+| `../fuzz-2006-07-09-13403.pcap` | 2.4 MB | 1,467 nodes / 1,898 edges | yes, ~2.7 s (default — start here) |
+| `../fuzz-2006-08-23-6489.pcap`  | 7.3 MB | 10,733 nodes / 14,039 edges | yes, ~2.6 s (real stress case) |
+| `synthetic.pcap` (generated)    | tunable | ~2k nodes / 15.5k edges | yes, ~1.8 s (deliberately extreme) |
 
 > The `*.pcap` files are git-ignored, so they must be present locally to run.
 
@@ -97,10 +97,11 @@ CI. With no args it compares the two most recent runs.
 
 ### Real captures (default fixtures)
 
-`fuzz-2006-07-09-13403.pcap` → 1,467 nodes / 1,898 edges parses in ~59 ms, **settles in
-~8 s**, and holds a **~10 ms median tick (~96 fps ceiling)** with only ~1 % of ticks over
-budget. So on representative real traffic the app is already smooth — the heavy numbers
-below come from the deliberately extreme synthetic graph (8× the edges).
+`fuzz-2006-07-09-13403.pcap` → 1,467 nodes / 1,898 edges parses in ~59 ms. It now crosses onto
+the canvas fast-path (1.9k edges > the 1,200 threshold) and holds a **~4.5 ms median tick
+(~219 fps ceiling)**, settling in **~2.7 s** — down from ~10 ms / ~8 s on the old SVG path.
+`fuzz-2006-08-23-6489.pcap` is the real stress fixture: **10,733 nodes / 14,039 edges** (see the
+force-compute finding below).
 
 ### Synthetic stress (2,000 nodes / 15,520 edges / 13.8 MB)
 
@@ -123,13 +124,46 @@ linked ones). Measured before → after:
 The catastrophic startup ticks are gone, and the steady-state median improved too (the
 layout no longer explodes outward from one point).
 
-### Remaining bottleneck — steady-state SVG cost
+### Steady-state render cost — FIXED (canvas fast-path)
 
-The median tick is still **~39 ms (~25 fps ceiling)** and the graph still doesn't settle
-within 15 s, because every tick re-lays-out **~15.5k SVG `<line>`s + 2k node groups** in
-the DOM. This is the dominant remaining cost — **not** the glow/lighting (the harness
-confirms that costs ~nothing at this scale). The next lever is rendering the link layer to
-`<canvas>`, hiding links past a node threshold, or `sim.stop()` once settled.
+Past **600 nodes / 1,200 edges** the heavy layers now render to a single `<canvas>` instead
+of SVG: all links collapse into one batched, viewport-culled path (they share a color), nodes
+become cached glow-sprite + `arc()` draws, and the DOM stops mutating entirely — so per-tick
+cost scales with what's *on screen*, not with total graph size, and a settled graph is free.
+Small graphs (below the threshold) keep the full SVG treatment (entrance pops, ping rings,
+activity flashes). A decomposition probe pinned the cost exactly: at synthetic scale SVG spent
+~45 ms/tick re-laying-out the DOM, whereas the canvas *draw* is **0.8 ms**.
+
+| deterministic median tick | SVG before | canvas after | change |
+|---|--:|--:|--:|
+| synthetic (2k nodes / 15.5k edges) | 45.4 ms (22 fps) | **5.2 ms (192 fps)** | **−89 %** |
+| real 13403 (1.5k / 1.9k) | 10.2 ms (98 fps) | **4.5 ms (219 fps)** | −56 % |
+| settle, synthetic | never (>15 s) | **1.8 s** | — |
+| main-thread blocking, synthetic | 4027 ms | **0 ms** | −100 % |
+
+### Force compute at 10k+ nodes — FIXED (adaptive Barnes-Hut theta)
+
+With rendering off the critical path, the next ceiling is the `forceManyBody` charge force
+itself. The bigger real capture (`fuzz-2006-08-23-6489.pcap`, **10,733 nodes / 14,039 edges**)
+spent ~48 ms/tick purely in `sim.tick()` (canvas draw was ~1 ms). The Barnes-Hut approximation
+angle `theta` is the lever — `distanceMax` barely moved the needle (the graph is already
+compact), but opening `theta` cut the tick cleanly:
+
+| theta @ 10.7k nodes | median tick |
+|--:|--:|
+| 0.9 (d3 default) | 43.9 ms (23 fps) |
+| 1.5 | 25.6 ms (39 fps) |
+| 1.8 | 18.1 ms (55 fps) |
+| 2.2 | 15.0 ms (67 fps) |
+
+`index.html` scales `theta` with node count **in canvas mode only** (≤2,500 nodes keep the
+accurate 0.9; ramps to ~1.8 by 10k, capped at 2.0) — at that zoom the coarser spacing is
+imperceptible. Net on the 10.7k-node capture: **45.5 → 17.4 ms median tick (23 → 58 fps),
+settles in 2.6 s (was never), 0 ms blocking.**
+
+> The `<canvas>` sits at `z-index: 1`, so any *clickable* overlay must stack above it — the
+> legend needed an explicit `z-index: 10` it had previously done without (HUD/timeline already
+> had one). Watch for this when adding new interactive UI.
 
 ### Note on the metrics
 
@@ -138,7 +172,8 @@ which were dominated by the (now-fixed) startup hitches. The median still carrie
 run-to-run variance (the bench inherits whatever layout the prior settle produced), so
 `compare.mjs` treats changes under ~8 % as noise.
 
-**Next optimization lever** (reduce per-tick DOM work at scale): render the link layer to
-`<canvas>` instead of thousands of SVG elements, hide links past a node threshold, or
-`sim.stop()` once settled so an idle graph costs nothing. Use this harness to validate
-any such change against the baseline above.
+**Next optimization lever** (if you push well past ~15k nodes): rendering is no longer the
+bottleneck — the remaining per-tick cost is almost entirely `forceManyBody` + `forceLink`
+compute. Options from here are a higher `velocityDecay`/`alphaDecay` to settle in fewer ticks,
+capping the *simulated* set to on-screen nodes, or moving the layout into a Web Worker so it
+never blocks the main thread at all. Validate any such change against the canvas baseline above.
