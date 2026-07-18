@@ -30,7 +30,21 @@ button:active { transform: scale(0.98); }
 #btnSerial  { background: #b08000; }
 #btnSerial:hover  { background: #d4a017; }
 
-.hint-text { color: #8b949e; font-size: 13px; max-width: 560px; text-align: center; margin-top: 10px; line-height: 1.5; }
+.hint-text { color: #8b949e; font-size: 13px; max-width: 720px; text-align: center; margin-top: 10px; line-height: 1.5; }
+
+#sampleSelect {
+  padding: 12px 24px; color: #fff; background: #161b22; border: 1px solid #30363d;
+  border-radius: 6px; font-size: 15px; cursor: pointer; font-weight: bold;
+  min-width: 280px; text-align: center;
+  transition: border-color 0.2s, background 0.2s;
+  appearance: none; -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%238b949e' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 16px center; padding-right: 40px;
+}
+#sampleSelect:hover { border-color: #58a6ff; background: #1c2128; }
+#sampleSelect:focus  { outline: none; border-color: #8957e5; box-shadow: 0 0 0 2px rgba(137,87,229,0.3); }
+#sampleSelect option { background: #161b22; color: #e6edf3; font-weight: normal; }
+#sampleSelect optgroup { font-style: normal; font-weight: bold; color: #58a6ff; background: #161b22; }
 
 #hud { position: fixed; top: 14px; left: 16px; z-index: 10; display: none; }
 #stats { font-size: 13px; color: #8b949e; background: rgba(13,17,23,0.85); padding: 12px; border-radius: 8px; border: 1px solid #30363d; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
@@ -96,6 +110,9 @@ button:active { transform: scale(0.98); }
     Supports <b>.pcap / .cap / .pcapng</b> (native binary parsing with VLAN support), structured <b>.csv / .ndjson</b>, and live <b>ESP32 capture via WebSerial</b> (PCAPNG stream).<br>
     <i>Note: Ethernet link layer assumed for PCAP. PCAPNG streamed from ESP32 via 921600 baud.</i>
   </p>
+  <select id="sampleSelect">
+    <option value="" disabled selected>&#x1F4E6; Load Example PCAP&#x2026;</option>
+  </select>
 </div>
 
 <div id="hud">
@@ -965,116 +982,191 @@ function setProgress(pct, label) {
   if (pct>=100) setTimeout(()=>{ wrap.style.display='none'; },400);
 }
 
-// ─── PCAP / PCAPNG File Parser ────────────────────────────────────────────────
+// --- PCAP / PCAPNG File Parser (core - works with any ArrayBuffer) ---------------
+async function parsePCAPBuffer(arrayBuffer, opts = {}) {
+  const label = opts.label || 'PCAP';
+  const dv = new DataView(arrayBuffer);
+  const total = arrayBuffer.byteLength;
+  if (total < 24) throw new Error("File too small");
+
+  const magic = dv.getUint32(0, true);
+  const isPcapng = (magic === 0x0A0D0D0A); // Section Header Block magic
+
+  let offset = 0;
+  let le = true;
+  let linkType = 1;
+  let structural = false, legend = false, packetCount = 0;
+  const CHUNK = 2500;
+
+  setProgress(0, isPcapng ? `Starting PCAPNG Parse (${label})…` : `Starting PCAP Parse (${label})…`);
+
+  // Legacy PCAP Header Initialization
+  if (!isPcapng) {
+    if (magic === 0xa1b2c3d4 || magic === 0xa1b23c4d) le = true;
+    else if (magic === 0xd4c3b2a1 || magic === 0x4d3cb2a1) le = false;
+    else { alert('Invalid PCAP/PCAPNG: unknown magic'); return; }
+    linkType = dv.getUint32(20, le);
+    offset = 24;
+  }
+
+  while (offset < total) {
+    let done = 0;
+    while (offset < total && done < CHUNK) {
+      if (isPcapng) {
+        // --- PCAPNG Block Parsing ---
+        if (offset + 8 > total) break;
+        const blockType = dv.getUint32(offset, le);
+        let blockLen = dv.getUint32(offset + 4, le);
+
+        if (blockType === 0x0A0D0D0A) { // Section Header Block
+          const bom = dv.getUint32(offset + 8, true);
+          le = (bom === 0x1A2B3C4D);
+          blockLen = dv.getUint32(offset + 4, le); // Re-read length with correct endianness
+        } else if (blockType === 0x00000001) { // Interface Description Block
+          linkType = dv.getUint16(offset + 8, le);
+        } else if (blockType === 0x00000006) { // Enhanced Packet Block
+          const capLen2 = dv.getUint32(offset + 20, le);
+          const pktOffset = offset + 28;
+          if (pktOffset + capLen2 <= offset + blockLen) {
+            const r = parseEthernetFrame(dv, pktOffset, capLen2, linkType, total);
+            if (r) {
+              const c = processPacketData(r.src, r.dst, r.proto);
+              if (c.structuralChange) structural = true;
+              if (c.legendChanged) legend = true;
+            }
+            packetCount++; done++;
+          }
+        } else if (blockType === 0x00000003) { // Simple Packet Block
+          const origLen = dv.getUint32(offset + 8, le);
+          const pktData = blockLen - 16;
+          const capLen = Math.min(origLen, pktData);
+          if (capLen > 0 && offset + 12 + capLen <= offset + blockLen) {
+            const r = parseEthernetFrame(dv, offset + 12, capLen, linkType, total);
+            if (r) {
+              const c = processPacketData(r.src, r.dst, r.proto);
+              if (c.structuralChange) structural = true;
+              if (c.legendChanged) legend = true;
+            }
+            packetCount++; done++;
+          }
+        }
+
+        if (blockLen < 12) { offset = total; break; } // Corrupt block prevention
+        offset += blockLen;
+
+      } else {
+        // --- Legacy PCAP Frame Parsing ---
+        if (offset + 16 > total) break;
+        const inclLen = dv.getUint32(offset + 8, le);
+        const pktStart = offset + 16;
+        offset = pktStart + inclLen;
+        packetCount++; done++;
+        if (offset > total || inclLen === 0) continue;
+
+        const r = parseEthernetFrame(dv, pktStart, inclLen, linkType, total);
+        if (r) {
+          const c = processPacketData(r.src, r.dst, r.proto);
+          if (c.structuralChange) structural = true;
+          if (c.legendChanged) legend = true;
+        }
+      }
+    }
+
+    if (offset < total) {
+      setProgress(Math.min(99, Math.round((offset / total) * 100)), `Parsing ${isPcapng ? 'PCAPNG' : 'PCAP'}… ${packetCount.toLocaleString()} packets`);
+      await new Promise(r => setTimeout(r, 0));
+    }
+  }
+
+  setProgress(100);
+  isLive = false;
+  timeSlider.max = globalPacketIndex; timeSlider.value = globalPacketIndex;
+  timeStatus.textContent = isPcapng ? 'PCAPNG' : 'PCAP';
+  timeStatus.style.color = '#8957e5';
+  if (legend) updateLegend();
+  updateGraph();
+}
+
+// --- File-picker PCAP loader (thin wrapper) ----------------------------------
 async function processStaticPCAP() {
   try {
     const file = await fileHandle.getFile();
     const arrayBuffer = await file.arrayBuffer();
-    const dv = new DataView(arrayBuffer);
-    const total = arrayBuffer.byteLength;
-    if (total < 24) throw new Error("File too small");
-
-    const magic = dv.getUint32(0, true);
-    const isPcapng = (magic === 0x0A0D0D0A); // Section Header Block magic
-    
-    let offset = 0;
-    let le = true;
-    let linkType = 1;
-    let structural = false, legend = false, packetCount = 0;
-    const CHUNK = 2500;
-
-    setProgress(0, isPcapng ? 'Starting PCAPNG Parse\u2026' : 'Starting PCAP Parse\u2026');
-
-    // Legacy PCAP Header Initialization
-    if (!isPcapng) {
-      if (magic === 0xa1b2c3d4 || magic === 0xa1b23c4d) le = true;
-      else if (magic === 0xd4c3b2a1 || magic === 0x4d3cb2a1) le = false;
-      else { alert('Invalid PCAP/PCAPNG: unknown magic'); return; }
-      linkType = dv.getUint32(20, le);
-      offset = 24;
-    }
-
-    while (offset < total) {
-      let done = 0;
-      while (offset < total && done < CHUNK) {
-        if (isPcapng) {
-          // --- PCAPNG Block Parsing ---
-          if (offset + 8 > total) break;
-          const blockType = dv.getUint32(offset, le);
-          let blockLen = dv.getUint32(offset + 4, le);
-
-          if (blockType === 0x0A0D0D0A) { // Section Header Block
-            const bom = dv.getUint32(offset + 8, true);
-            le = (bom === 0x1A2B3C4D);
-            blockLen = dv.getUint32(offset + 4, le); // Re-read length with correct endianness
-          } else if (blockType === 0x00000001) { // Interface Description Block
-            linkType = dv.getUint16(offset + 8, le);
-          } else if (blockType === 0x00000006) { // Enhanced Packet Block
-            const capLen2 = dv.getUint32(offset + 20, le);
-            const pktOffset = offset + 28;
-            if (pktOffset + capLen2 <= offset + blockLen) {
-              const r = parseEthernetFrame(dv, pktOffset, capLen2, linkType, total);
-              if (r) {
-                const c = processPacketData(r.src, r.dst, r.proto);
-                if (c.structuralChange) structural = true;
-                if (c.legendChanged) legend = true;
-              }
-              packetCount++; done++;
-            }
-          } else if (blockType === 0x00000003) { // Simple Packet Block
-            const origLen = dv.getUint32(offset + 8, le);
-            const pktData = blockLen - 16;
-            const capLen = Math.min(origLen, pktData);
-            if (capLen > 0 && offset + 12 + capLen <= offset + blockLen) {
-              const r = parseEthernetFrame(dv, offset + 12, capLen, linkType, total);
-              if (r) {
-                const c = processPacketData(r.src, r.dst, r.proto);
-                if (c.structuralChange) structural = true;
-                if (c.legendChanged) legend = true;
-              }
-              packetCount++; done++;
-            }
-          }
-          
-          if (blockLen < 12) { offset = total; break; } // Corrupt block prevention
-          offset += blockLen;
-          
-        } else {
-          // --- Legacy PCAP Frame Parsing ---
-          if (offset + 16 > total) break;
-          const inclLen = dv.getUint32(offset + 8, le);
-          const pktStart = offset + 16;
-          offset = pktStart + inclLen; 
-          packetCount++; done++;
-          if (offset > total || inclLen === 0) continue;
-          
-          const r = parseEthernetFrame(dv, pktStart, inclLen, linkType, total);
-          if (r) {
-            const c = processPacketData(r.src, r.dst, r.proto);
-            if (c.structuralChange) structural = true;
-            if (c.legendChanged) legend = true;
-          }
-        }
-      }
-      
-      if (offset < total) {
-        setProgress(Math.min(99, Math.round((offset / total) * 100)), `Parsing ${isPcapng ? 'PCAPNG' : 'PCAP'}\u2026 ${packetCount.toLocaleString()} packets`);
-        await new Promise(r => setTimeout(r, 0));
-      }
-    }
-    
-    setProgress(100);
-    isLive = false;
-    timeSlider.max = globalPacketIndex; timeSlider.value = globalPacketIndex;
-    timeStatus.textContent = isPcapng ? 'PCAPNG' : 'PCAP'; 
-    timeStatus.style.color = '#8957e5';
-    if (legend) updateLegend();
-    updateGraph();
+    await parsePCAPBuffer(arrayBuffer, { label: file.name });
   } catch(err) {
     document.getElementById('progress-bar-wrap').style.display = 'none';
     alert('Failed to parse capture file: ' + err.message);
   }
 }
+
+// --- Remote Sample PCAP Registry + Fetch ------------------------------------
+const SAMPLE_CAPTURES = [
+  // Core Protocols
+  { name: 'HTTP Request/Response',        cat: 'Core Protocols', url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/http.cap' },
+  { name: 'DHCP Traffic',                 cat: 'Core Protocols', url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/dhcp.pcap' },
+  { name: 'DNS Lookups',                  cat: 'Core Protocols', url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/dns.cap' },
+  { name: 'SMTP Simple Session',          cat: 'Core Protocols', url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/smtp.pcap' },
+  { name: 'IPv6 + ICMPv6',                cat: 'Core Protocols', url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/v6.pcap' },
+  { name: 'Small IoT Device (PCAPNG)',    cat: 'Core Protocols', url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/dof-small-device.pcapng' },
+  // VoIP & Media
+  { name: 'SIP + RTP Call (aaa)',         cat: 'VoIP & Media',   url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/aaa.pcap' },
+  // Routing
+  { name: 'OSPF Initialization',          cat: 'Routing',        url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/ospf.cap' },
+  { name: 'BGP + AS Path (.gz)',          cat: 'Routing',        url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/bgp.pcap.gz' },
+  // Infrastructure
+  { name: 'MPLS Basic',                   cat: 'Infrastructure', url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/mpls-basic.cap' },
+  { name: 'STP Spanning Tree',            cat: 'Infrastructure', url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/stp.pcap' },
+  { name: 'NFS v3 (.gz)',                 cat: 'Infrastructure', url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/nfsv3.pcap.gz' },
+  { name: 'USB Memory Stick',             cat: 'Infrastructure', url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/usb_memory_stick.pcap' },
+  // Security
+  { name: 'Slammer Worm',                 cat: 'Security',       url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/slammer.pcap' },
+  { name: 'Teardrop Attack',              cat: 'Security',       url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/teardrop.cap' },
+  // Fuzzing (Wireshark automated captures)
+  { name: 'Fuzz Test (2006-07-05)',       cat: 'Fuzzing',        url: 'https://www.wireshark.org/download/automated/captures/fuzz-2006-07-05-6279.pcap' },
+  { name: 'Randpkt (2020-09-06)',         cat: 'Fuzzing',        url: 'https://www.wireshark.org/download/automated/captures/randpkt-2020-09-06-16170.pcap' },
+];
+
+async function loadRemoteSample(url, name) {
+  try {
+    setProgress(5, `Downloading ${name}…`);
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    let arrayBuffer = await response.arrayBuffer();
+    setProgress(10, `Downloaded ${(arrayBuffer.byteLength / 1024).toFixed(1)} KB - parsing…`);
+
+    // Auto-decompress gzip-compressed captures
+    if (url.endsWith('.gz')) {
+      setProgress(12, `Decompressing gzip (${(arrayBuffer.byteLength / 1024).toFixed(1)} KB)…`);
+      const ds = new DecompressionStream('gzip');
+      const writer = ds.writable.getWriter();
+      const reader = ds.readable.getReader();
+      writer.write(arrayBuffer);
+      writer.close();
+      const chunks = [];
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+      }
+      const totalLen = chunks.reduce((s, c) => s + c.byteLength, 0);
+      const merged = new Uint8Array(totalLen);
+      let off = 0;
+      for (const c of chunks) { merged.set(new Uint8Array(c.buffer, c.byteOffset, c.byteLength), off); off += c.byteLength; }
+      arrayBuffer = merged.buffer;
+      setProgress(15, `Decompressed to ${(arrayBuffer.byteLength / 1024).toFixed(1)} KB - parsing…`);
+    }
+
+    await parsePCAPBuffer(arrayBuffer, { label: name });
+  } catch (err) {
+    document.getElementById('progress-bar-wrap').style.display = 'none';
+    if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError') || err.name === 'TypeError') {
+      alert('Could not download "' + name + '".\n\nThe remote server may block cross-origin requests when running from a local file.\nTry hosting the app on a web server, or download the file manually from:\n' + url);
+    } else {
+      alert('Failed to load "' + name + '": ' + err.message);
+    }
+  }
+}
+
 
 // ─── Wireshark CSV Parser ──────────────────────────────────────────────────────
 async function processStaticCSV() {
@@ -1336,6 +1428,32 @@ document.getElementById('btnStatic').onclick = async () => {
 };
 
 document.getElementById('btnSerial').onclick = connectWebSerial;
+
+// --- Populate and wire the sample PCAP dropdown ---
+(function populateSampleDropdown() {
+  const sel = document.getElementById('sampleSelect');
+  const cats = [...new Set(SAMPLE_CAPTURES.map(s => s.cat))];
+  cats.forEach(cat => {
+    const grp = document.createElement('optgroup');
+    grp.label = cat;
+    SAMPLE_CAPTURES.filter(s => s.cat === cat).forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = s.url;
+      opt.textContent = s.name;
+      grp.appendChild(opt);
+    });
+    sel.appendChild(grp);
+  });
+  sel.addEventListener('change', async () => {
+    const url = sel.value;
+    if (!url) return;
+    const name = sel.selectedOptions[0].textContent;
+    sel.value = ''; // reset to placeholder
+    initUI();
+    await loadOUIDatabase();
+    await loadRemoteSample(url, name);
+  });
+})();
 
 window.addEventListener('resize', () => {
   svg.attr('width', W()).attr('height', H());
