@@ -140,6 +140,7 @@ button:active { transform: scale(0.97); }
     Nodes: <b id="nc" style="color:#e6edf3">0</b> &nbsp;|&nbsp;
     Edges: <b id="ec" style="color:#e6edf3">0</b> &nbsp;|&nbsp;
     Packets: <b id="pc" style="color:#e6edf3">0</b>
+    <button id="btnLock" style="margin-left:10px;padding:4px 8px;font-size:12px;background:#30363d;border-radius:4px;" title="Toggle node locking">&#x1F512; Locked</button>
   </div>
 </div>
 
@@ -170,6 +171,8 @@ let globalPacketIndex = 0;
 let fileHandle = null;
 let isLive = true;
 let activeFilter = null;
+let hoveredNodeId = null;      // SVG hover highlight
+let canvasHoveredId = null;    // canvas hover highlight
 
 // ─── OUI Resolution State ──────────────────────────────────────────────────────
 const ouiMap = new Map();
@@ -234,6 +237,34 @@ function updateLegend() {
   });
 }
 
+// --- Obsidian-style hover highlight (SVG path) -------------------------------
+function applyHighlight(id) {
+  if (renderMode !== 'svg') return;
+  const neighborIds = new Set([id]);
+  edges.forEach(e => {
+    const sid = e.source.id || e.source, tid = e.target.id || e.target;
+    if (sid === id) neighborIds.add(tid);
+    if (tid === id) neighborIds.add(sid);
+  });
+  gNodes.selectAll('.node')
+    .style('opacity', d => neighborIds.has(d.id) ? 1 : 0.10)
+    .style('transition', 'opacity 0.15s');
+  gLinks.selectAll('line')
+    .style('opacity', e => {
+      const sid = e.source.id || e.source, tid = e.target.id || e.target;
+      return (sid === id || tid === id) ? getEdgeOpacity(e) : 0.04;
+    })
+    .style('transition', 'opacity 0.15s');
+}
+
+function clearHighlight() {
+  hoveredNodeId = null;
+  if (renderMode === 'svg') {
+    gNodes.selectAll('.node').style('opacity', 1).style('transition', 'opacity 0.2s');
+    gLinks.selectAll('line').style('opacity', d => getEdgeOpacity(d)).style('transition', 'opacity 0.2s');
+  }
+}
+
 // ─── D3 Setup ──────────────────────────────────────────────────────────────────
 const getRadius = d => Math.min(45, 6 + Math.sqrt(d.currentCount) * 2.5);
 const bisectHistory = d3.bisector(d => d.index).right;
@@ -269,6 +300,7 @@ svg.call(d3.zoom().scaleExtent([0.1, 4]).on('zoom', e => g.attr('transform', e.t
 // the whole layout. Only unpinned (brand-new) nodes are free to be placed.
 const PIN_ALPHA = 0.025;
 let draggingNode = null;
+let lockState = 'locked';  // 'locked' | 'unlocked' | 'freeflow'
 
 function pinNode(d) {
   if (d && d.x != null && d.y != null) { d.fx = d.x; d.fy = d.y; }
@@ -277,15 +309,43 @@ function pinNodes(list) {
   for (let i = 0; i < list.length; i++) pinNode(list[i]);
 }
 function isPinned(d) { return d.fx != null && d.fy != null; }
+function unpinNode(d) { delete d.fx; delete d.fy; }
+function unpinAllNodes() {
+  nodes.forEach(n => unpinNode(n));
+  sim.nodes().forEach(n => unpinNode(n));
+}
+
+// FreeFlow drag propagation: nudge connected neighbours when dragging a node.
+// Called with the dragged node and its movement delta since the last drag tick.
+function propagateDrag(dragged, dx, dy) {
+  if (lockState !== 'freeflow') return;
+  const draggedId = dragged.id;
+  const lnk = sim.force('link').links();
+  const factor = 0.35;
+  for (let i = 0; i < lnk.length; i++) {
+    const link = lnk[i];
+    const sid = link.source.id || link.source;
+    const tid = link.target.id || link.target;
+    let nb = null;
+    if (sid === draggedId) nb = link.target;
+    else if (tid === draggedId) nb = link.source;
+    if (nb && nb !== dragged && !isPinned(nb)) {
+      nb.x += dx * factor;
+      nb.y += dy * factor;
+    }
+  }
+}
 
 const sim = d3.forceSimulation()
   .force('link', d3.forceLink().id(d => d.id).distance(100))
-  .force('charge', d3.forceManyBody().strength(-200))
+  .force('charge', d3.forceManyBody().strength(-300))
   .force('center', d3.forceCenter(W()/2, H()/2))
+  .force('collide', d3.forceCollide().radius(d => getRadius(d) + 4).strength(1).iterations(2))
   .on('tick', () => {
     // Auto-pin once the layout has cooled so subsequent filter/timeline updates
     // re-introduce nodes at the same coordinates instead of re-exploding the graph.
-    if (!draggingNode && sim.alpha() < PIN_ALPHA) {
+    // Only auto-pin when locking is enabled.
+    if (lockState === 'locked' && !draggingNode && sim.alpha() < PIN_ALPHA) {
       const ns = sim.nodes();
       for (let i = 0; i < ns.length; i++) {
         if (!isPinned(ns[i])) pinNode(ns[i]);
@@ -376,18 +436,34 @@ function drawCanvas() {
   const x0 = -view.x / view.k - m, y0 = -view.y / view.k - m;
   const x1 = (w - view.x) / view.k + m, y1 = (h - view.y) / view.k + m;
 
+  // Build neighbour set for canvas hover highlight (Obsidian-style).
+  const hoverSet = canvasHoveredId ? new Set([canvasHoveredId]) : null;
+  if (hoverSet) {
+    for (let i = 0; i < renderEdges.length; i++) {
+      const e = renderEdges[i], sid = e.source.id || e.source, tid = e.target.id || e.target;
+      if (sid === canvasHoveredId) hoverSet.add(tid);
+      if (tid === canvasHoveredId) hoverSet.add(sid);
+    }
+  }
+
   // Links — colored/thickened by packet history (proto + currentCount). Grouped by
   // stroke style so we still batch path() calls instead of one stroke per edge.
-  // Key = color|widthBucket so nearby widths share a path.
+  // Key = color|width|highlightFlag so hover-dimming stays batched.
   const edgeBatches = new Map();
   for (let i = 0; i < renderEdges.length; i++) {
     const e = renderEdges[i], sx = e.source.x, sy = e.source.y, tx = e.target.x, ty = e.target.y;
     if ((sx < x0 && tx < x0) || (sx > x1 && tx > x1) || (sy < y0 && ty < y0) || (sy > y1 && ty > y1)) continue;
+    const sid = e.source.id || e.source, tid = e.target.id || e.target;
+    const hl = hoverSet ? (sid === canvasHoveredId || tid === canvasHoveredId ? 1 : 0) : 1;
     const color = colorScale(e.displayProto || e.proto || 'UNKNOWN');
-    const w = Math.round(getEdgeWidth(e) * 2) / 2; // 0.5px buckets
-    const key = color + '|' + w;
+    const w = Math.round(getEdgeWidth(e) * 2) / 2;
+    const key = color + '|' + w + '|' + hl;
     let b = edgeBatches.get(key);
-    if (!b) { b = { color, w, alpha: getEdgeOpacity(e), segs: [] }; edgeBatches.set(key, b); }
+    if (!b) {
+      const baseAlpha = getEdgeOpacity(e);
+      b = { color, w, alpha: hl ? baseAlpha : baseAlpha * 0.06, segs: [] };
+      edgeBatches.set(key, b);
+    }
     b.segs.push(sx, sy, tx, ty);
   }
   for (const b of edgeBatches.values()) {
@@ -401,20 +477,21 @@ function drawCanvas() {
   }
   ctx.globalAlpha = 1;
 
-  // Nodes — cached glow sprite + core disc, viewport-culled. Collect on-screen nodes for
-  // labelling only when labels will actually be drawn (zoomed out is the common heavy case,
-  // where we push nothing), reusing labelBuf so a steady 60fps redraw stays allocation-free.
+  // Nodes — cached glow sprite + core disc, viewport-culled.
   const wantLabels = view.k > 0.55;
   labelBuf.length = 0;
   for (let i = 0; i < renderNodes.length; i++) {
     const d = renderNodes[i];
     if (d.x < x0 || d.x > x1 || d.y < y0 || d.y > y1) continue;
     const r = getRadius(d), cs = colorState(colorScale(d.displayProto)), gr = r * 2.2;
+    const dimmed = hoverSet && !hoverSet.has(d.id);
+    if (dimmed) ctx.globalAlpha = 0.12;
     ctx.drawImage(cs.glow, d.x - gr, d.y - gr, gr * 2, gr * 2);
     ctx.beginPath(); ctx.arc(d.x, d.y, r, 0, 6.283185307179586);
     ctx.fillStyle = cs.fill; ctx.fill();
     ctx.lineWidth = 1.5; ctx.strokeStyle = cs.stroke; ctx.stroke();
-    if (wantLabels) labelBuf.push(d);
+    if (dimmed) ctx.globalAlpha = 1;
+    if (wantLabels && !dimmed) labelBuf.push(d);
   }
 
   // Labels — only when readable: zoomed in enough and not a dense unreadable blob.
@@ -466,14 +543,29 @@ function setupCanvasInteraction() {
     .on('drag',  ev => {
       if (!ev.subject) return;
       const [gx, gy] = screenToGraph(ev.sourceEvent.clientX, ev.sourceEvent.clientY);
+      const dx = gx - ev.subject.x, dy = gy - ev.subject.y;
+      propagateDrag(ev.subject, dx, dy);
       ev.subject.fx = gx; ev.subject.fy = gy;
       ev.subject.x = gx;  ev.subject.y = gy;
       drawCanvas();
     })
     .on('end',   ev => {
-      if (ev.subject) pinNode(ev.subject);
+      if (ev.subject) {
+        if (lockState !== 'unlocked') pinNode(ev.subject); else unpinNode(ev.subject);
+      }
       draggingNode = null;
     }));
+
+  // Canvas hover tracking — Obsidian-style neighbour highlight.
+  canvasEl.addEventListener('mousemove', ev => {
+    const n = nodeAt(ev.clientX, ev.clientY);
+    const prev = canvasHoveredId;
+    canvasHoveredId = n ? n.id : null;
+    if (canvasHoveredId !== prev) drawCanvas();
+  });
+  canvasEl.addEventListener('mouseleave', () => {
+    if (canvasHoveredId !== null) { canvasHoveredId = null; drawCanvas(); }
+  });
 }
 
 function setRenderMode(m) {
@@ -570,8 +662,8 @@ function updateGraph() {
     .call(d3.drag()
       // Pin-on-drag only — never reheat the whole graph (that moved every node).
       .on('start', (e, d) => { draggingNode = d; d.fx = d.x; d.fy = d.y; })
-      .on('drag',  (e, d) => { d.fx = e.x; d.fy = e.y; d.x = e.x; d.y = e.y; })
-      .on('end',   (e, d) => { pinNode(d); draggingNode = null; }));
+      .on('drag',  (e, d) => { const dx = e.x - d.x, dy = e.y - d.y; propagateDrag(d, dx, dy); d.fx = e.x; d.fy = e.y; d.x = e.x; d.y = e.y; })
+      .on('end',   (e, d) => { if (lockState !== 'unlocked') pinNode(d); else unpinNode(d); draggingNode = null; }));
 
   // Soft glow halo behind the body — a cheap gradient-filled disc (no SVG filter).
   ne.append('circle').attr('class', 'halo')
@@ -610,6 +702,10 @@ function updateGraph() {
     .style('opacity', lite ? 1 : 0);
   if (!lite) ne.select('text').transition().delay(180).duration(500).style('opacity', 1);
 
+  // Obsidian-style hover: highlight the hovered node + its direct neighbours, dim the rest.
+  ne.on('mouseenter', (ev, d) => { hoveredNodeId = d.id; applyHighlight(d.id); })
+    .on('mouseleave', () => { clearHighlight(); });
+
   // Keep the glow halo sized with its node (cheap attr write, no transition).
   node.select('circle.halo')
     .attr('r', d => getRadius(d) * 2.2)
@@ -620,6 +716,10 @@ function updateGraph() {
     .attr('r', getRadius)
     .attr('fill', d => colorScale(d.displayProto) + '44')
     .attr('stroke', d => colorScale(d.displayProto));
+
+  // Hover handlers on the update selection (existing nodes).
+  node.on('mouseenter', (ev, d) => { hoveredNodeId = d.id; applyHighlight(d.id); })
+      .on('mouseleave', () => { clearHighlight(); });
 
   // Activity flash — on-screen nodes briefly brighten when fresh packets arrive.
   // Named 'flash' transition runs alongside (not cancelling) the radius tween.
@@ -654,6 +754,9 @@ function updateGraph() {
   // Hand the current active set to the canvas renderer and paint one frame immediately
   // (so legend filters / timeline scrubs are reflected even when the sim is already at rest).
   renderNodes = activeNodes; renderEdges = activeEdges;
+  // Clear hover if the hovered node was removed (filter / timeline).
+  if (hoveredNodeId && !activeNodeIds.has(hoveredNodeId)) clearHighlight();
+  if (canvasHoveredId && !activeNodeIds.has(canvasHoveredId)) { canvasHoveredId = null; }
   if (renderMode === 'canvas') drawCanvas();
 }
 
@@ -669,12 +772,16 @@ let spawnIndex = 0;
 function initialPosition(peer) {
   const i = spawnIndex++;
   const a = i * GOLDEN_ANGLE;
+  // Small random jitter breaks symmetry that can cause the force sim to collapse nodes.
+  const jx = (Math.random() - 0.5) * 3, jy = (Math.random() - 0.5) * 3;
   if (peer) {
-    return { x: peer.x + Math.cos(a) * 24 + (Math.random() - 0.5) * 8,
-             y: peer.y + Math.sin(a) * 24 + (Math.random() - 0.5) * 8 };
+    return { x: peer.x + Math.cos(a) * 22 + jx,
+             y: peer.y + Math.sin(a) * 22 + jy };
   }
-  const r = 18 * Math.sqrt(i);
-  return { x: W() / 2 + Math.cos(a) * r, y: H() / 2 + Math.sin(a) * r };
+  const r = 14 * Math.sqrt(i + 0.5); // +0.5 so node 0 is not exactly at centre
+  const clampR = Math.min(r, Math.min(W(), H()) * 0.35);
+  return { x: W() / 2 + Math.cos(a) * clampR + jx,
+           y: H() / 2 + Math.sin(a) * clampR + jy };
 }
 
 // ─── Shared Packet Ingestion ───────────────────────────────────────────────────
@@ -816,6 +923,38 @@ function initUI() {
   document.getElementById('legend').style.display = 'block';
   document.getElementById('timeline').style.display = 'flex';
 }
+
+// --- Lock / Unlock / FreeFlow toggle (3-cycle) --------------------------------
+function toggleNodeLock() {
+  const btn = document.getElementById('btnLock');
+  // Cycle: locked → unlocked → freeflow → locked
+  if (lockState === 'locked') {
+    // → Unlocked: no auto-pin, drag releases
+    lockState = 'unlocked';
+    unpinAllNodes();
+    sim.alpha(0.3).restart();
+    btn.innerHTML = '&#x1F513; Unlocked';
+    btn.style.background = '#8957e5';
+    btn.title = 'Nodes float freely, drag releases — click for FreeFlow';
+  } else if (lockState === 'unlocked') {
+    // → FreeFlow: no auto-pin, drag pins permanently (classic behaviour)
+    lockState = 'freeflow';
+    sim.alpha(0.3).restart();
+    btn.innerHTML = '&#x1F680; FreeFlow';
+    btn.style.background = '#d29922';
+    btn.title = 'Nodes float freely, drag pins them — click to Lock';
+  } else {
+    // → Locked: auto-pin after cooling, drag pins permanently
+    lockState = 'locked';
+    const ns = sim.nodes();
+    for (let i = 0; i < ns.length; i++) pinNode(ns[i]);
+    btn.innerHTML = '&#x1F512; Locked';
+    btn.style.background = '#30363d';
+    btn.title = 'Nodes auto-pin after settling — click to Unlock';
+  }
+}
+
+document.getElementById('btnLock').addEventListener('click', toggleNodeLock);
 
 // Snapshot helpers used by the puppeteer harness / console debugging.
 function snapshotPositions() {
@@ -1004,6 +1143,12 @@ function setProgress(pct, label) {
 
 // --- PCAP / PCAPNG File Parser (core - works with any ArrayBuffer) ---------------
 async function parsePCAPBuffer(arrayBuffer, opts = {}) {
+  // Reset graph state for a clean load — every static file starts fresh.
+  nodes.clear(); edges.clear(); knownProtos.clear(); resolvedMacs.clear();
+  globalPacketIndex = 0; spawnIndex = 0;
+  if (autoplayRaf != null) stopAutoplay();
+  updateGraph(); updateLegend();
+
   const label = opts.label || 'PCAP';
   const dv = new DataView(arrayBuffer);
   const total = arrayBuffer.byteLength;
@@ -1121,32 +1266,21 @@ async function processStaticPCAP() {
 
 // --- Remote Sample PCAP Registry + Fetch ------------------------------------
 const SAMPLE_CAPTURES = [
-  // Core Protocols
-  { name: 'HTTP Request/Response',        cat: 'Core Protocols', url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/http.cap' },
-  { name: 'DHCP Traffic',                 cat: 'Core Protocols', url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/dhcp.pcap' },
-  { name: 'DNS Lookups',                  cat: 'Core Protocols', url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/dns.cap' },
-  { name: 'SMTP Simple Session',          cat: 'Core Protocols', url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/smtp.pcap' },
-  { name: 'IPv6 + ICMPv6',                cat: 'Core Protocols', url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/v6.pcap' },
-  { name: 'Small IoT Device (PCAPNG)',    cat: 'Core Protocols', url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/dof-small-device.pcapng' },
-  // VoIP & Media
-  { name: 'SIP + RTP Call (aaa)',         cat: 'VoIP & Media',   url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/aaa.pcap' },
-  // Routing
-  { name: 'OSPF Initialization',          cat: 'Routing',        url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/ospf.cap' },
-  { name: 'BGP + AS Path (.gz)',          cat: 'Routing',        url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/bgp.pcap.gz' },
-  // Infrastructure
-  { name: 'MPLS Basic',                   cat: 'Infrastructure', url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/mpls-basic.cap' },
-  { name: 'STP Spanning Tree',            cat: 'Infrastructure', url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/stp.pcap' },
-  { name: 'NFS v3 (.gz)',                 cat: 'Infrastructure', url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/nfsv3.pcap.gz' },
-  { name: 'USB Memory Stick',             cat: 'Infrastructure', url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/usb_memory_stick.pcap' },
-  // Security
-  { name: 'Slammer Worm',                 cat: 'Security',       url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/slammer.pcap' },
-  { name: 'Teardrop Attack',              cat: 'Security',       url: 'https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/teardrop.cap' },
-  // Fuzzing (Wireshark automated captures)
-  { name: 'Fuzz Test (2006-07-05)',       cat: 'Fuzzing',        url: 'https://www.wireshark.org/download/automated/captures/fuzz-2006-07-05-6279.pcap' },
-  { name: 'Randpkt (2020-09-06)',         cat: 'Fuzzing',        url: 'https://www.wireshark.org/download/automated/captures/randpkt-2020-09-06-16170.pcap' },
+  { name: 'fuzz-2006-07-05-6279.pcap',    cat: 'Fuzz (2006-2009)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2006-07-05-6279.pcap' },
+  { name: 'fuzz-2006-08-26-27284.pcap',   cat: 'Fuzz (2006-2009)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2006-08-26-27284.pcap' },
+  { name: 'fuzz-2007-03-14-28690.pcap',   cat: 'Fuzz (2006-2009)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2007-03-14-28690.pcap' },
+  { name: 'fuzz-2008-12-18-30921.pcap',   cat: 'Fuzz (2006-2009)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2008-12-18-30921.pcap' },
+  { name: 'fuzz-2009-08-11-31213.pcap',   cat: 'Fuzz (2006-2009)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2009-08-11-31213.pcap' },
+  { name: 'fuzz-2010-06-28-29484.pcap',   cat: 'Fuzz (2010-2011)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2010-06-28-29484.pcap' },
+  { name: 'fuzz-2010-11-14-23230.pcap',   cat: 'Fuzz (2010-2011)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2010-11-14-23230.pcap' },
+  { name: 'fuzz-2011-08-06-32654.pcap',   cat: 'Fuzz (2010-2011)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2011-08-06-32654.pcap' },
+  { name: 'fuzz-2011-10-26-27718.pcap',   cat: 'Fuzz (2010-2011)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2011-10-26-27718.pcap' },
+  { name: 'randpkt-2020-09-06-16170.pcap',cat: 'Recent (2020)',     url: 'https://www.wireshark.org/download/automated/captures/randpkt-2020-09-06-16170.pcap' },
 ];
+const SAMPLE_CAPTURES_BASE = 'https://www.wireshark.org/download/automated/captures/';
 
 async function loadRemoteSample(url, name) {
+  // Graph state is reset inside parsePCAPBuffer — just fetch and feed.
   try {
     setProgress(5, `Downloading ${name}…`);
     const response = await fetch(url);
@@ -1179,11 +1313,12 @@ async function loadRemoteSample(url, name) {
     await parsePCAPBuffer(arrayBuffer, { label: name });
   } catch (err) {
     document.getElementById('progress-bar-wrap').style.display = 'none';
-    // CORS or network error — open in a new tab so the browser downloads the file.
-    // Then the user can load it via the local file-picker button.
-    window.open(url, '_blank');
+    // Trigger a real file download via hidden <a> — works for direct file URLs.
+    const a = document.createElement('a');
+    a.href = url; a.download = ''; a.style.display = 'none';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
     if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError') || err.name === 'TypeError') {
-      alert('"' + name + '" is downloading in a new tab.\n\nOnce downloaded, use "Parse PCAP / PCAPNG" to load it.');
+      alert(`"${name}" is downloading.\n\nOnce downloaded, use "Parse PCAP / PCAPNG" to load it.`);
     } else {
       alert('Failed to load "' + name + '": ' + err.message);
     }
@@ -1193,6 +1328,12 @@ async function loadRemoteSample(url, name) {
 
 // ─── Wireshark CSV Parser ──────────────────────────────────────────────────────
 async function processStaticCSV() {
+  // Reset for a clean load.
+  nodes.clear(); edges.clear(); knownProtos.clear(); resolvedMacs.clear();
+  globalPacketIndex = 0; spawnIndex = 0;
+  if (autoplayRaf != null) stopAutoplay();
+  updateGraph(); updateLegend();
+
   try {
     const file = await fileHandle.getFile();
     const text = await file.text();
