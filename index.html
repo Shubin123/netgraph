@@ -348,9 +348,16 @@ const sim = d3.forceSimulation()
         if (!isPinned(ns[i])) pinNode(ns[i]);
       }
     }
-    // FreeFlow / Unlocked: never let the sim fully stop.
-    if (lockState !== 'locked' && sim.alpha() < 0.015 && !draggingNode) {
-      sim.alpha(0.025).restart();
+    // FreeFlow / Unlocked: never let the sim stop, and strip any stray pins
+    // that might survive a drag gesture (safety net).
+    if (lockState !== 'locked') {
+      if (!draggingNode) {
+        const ns = sim.nodes();
+        for (let i = 0; i < ns.length; i++) {
+          if (isPinned(ns[i])) unpinNode(ns[i]);
+        }
+      }
+      if (sim.alpha() < 0.015) sim.alpha(0.025).restart();
     }
     if (renderMode === 'canvas') { drawCanvas(); return; }
     gLinks.selectAll('line')
