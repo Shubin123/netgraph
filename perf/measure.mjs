@@ -23,8 +23,17 @@ const arg = (k, d) => {
   const i = process.argv.indexOf('--' + k);
   return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : d;
 };
-const CHROME = process.env.CHROME_PATH ||
-  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+// Prefer CHROME_PATH, then common Windows / macOS / Linux install locations.
+const CHROME = process.env.CHROME_PATH || [
+  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+  'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+  'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  '/usr/bin/google-chrome',
+  '/usr/bin/chromium-browser',
+  '/usr/bin/chromium',
+].find(p => existsSync(p)) || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const HTML = resolve(arg('html', resolve(HERE, '..', 'index.html')));
 // Default to the smaller real Wireshark capture; override with --capture for the bigger
 // file (../fuzz-2006-08-23-6489.pcap) or a synthetic stress graph (synthetic.pcap).

@@ -10,6 +10,7 @@
     "measure:synthetic": "node gen-pcap.js && node measure.mjs --capture synthetic.pcap --label synthetic",
     "compare": "node compare.mjs",
     "gen": "node gen-pcap.js",
+    "test": "node test-features.mjs",
     "bench": "npm run measure && npm run measure:big"
   },
   "dependencies": {

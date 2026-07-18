@@ -30,6 +30,7 @@ clean synthetic file):
 ## Run
 
 ```bash
+npm test                   # functional tests: edge timeline, autoplay, node pin/drag/filter stability
 npm run measure            # the smaller real capture (13403) — the default, start here
 npm run measure:big        # the larger real capture (6489)
 npm run bench              # both real captures, back to back
