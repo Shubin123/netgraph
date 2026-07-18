@@ -54,8 +54,15 @@ button:active { transform: scale(0.98); }
   position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
   width: 80%; max-width: 800px; background: rgba(13,17,23,0.9);
   padding: 15px 20px; border-radius: 12px; border: 1px solid #30363d;
-  display: none; align-items: center; gap: 15px; z-index: 10;
+  display: none; align-items: center; gap: 12px; z-index: 10;
 }
+#btnPlay {
+  padding: 6px 12px; font-size: 14px; min-width: 42px; background: #238636;
+  border-radius: 6px; line-height: 1;
+}
+#btnPlay:hover { background: #2ea043; }
+#btnPlay.playing { background: #9e6a03; }
+#btnPlay.playing:hover { background: #bb8009; }
 #timeSlider { flex-grow: 1; cursor: pointer; accent-color: #58a6ff; }
 #timeStatus { font-size: 12px; font-weight: bold; color: #3fb950; min-width: 60px; text-align: right; }
 
@@ -69,7 +76,7 @@ button:active { transform: scale(0.98); }
 .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
 
 #cv { position: fixed; inset: 0; z-index: 1; display: none; }
-.link { stroke: #30363d; stroke-width: 1.5; opacity: 0.4; }
+.link { stroke-width: 1.5; opacity: 0.55; }
 .node circle.core { stroke-width: 1.5; cursor: grab; }
 .node circle.ping, .node circle.halo { pointer-events: none; }
 .node text { font-size: 10px; fill: #8b949e; pointer-events: none; text-shadow: 0 1px 3px #000; }
@@ -109,6 +116,7 @@ button:active { transform: scale(0.98); }
 <div id="legend"></div>
 
 <div id="timeline">
+  <button id="btnPlay" title="Autoplay timeline" aria-label="Play timeline">&#9654;</button>
   <span style="font-size:12px;color:#8b949e;">Time</span>
   <input type="range" id="timeSlider" min="0" max="0" value="0">
   <div id="timeStatus">LIVE</div>
@@ -219,17 +227,44 @@ const gLinks = g.append('g'), gNodes = g.append('g');
 
 svg.call(d3.zoom().scaleExtent([0.1, 4]).on('zoom', e => g.attr('transform', e.transform)));
 
+// Node pinning keeps large graphs stable: once a node has settled (or the user
+// placed it), its fx/fy are set so force ticks and filter re-entries cannot shove
+// the whole layout. Only unpinned (brand-new) nodes are free to be placed.
+const PIN_ALPHA = 0.025;
+let draggingNode = null;
+
+function pinNode(d) {
+  if (d && d.x != null && d.y != null) { d.fx = d.x; d.fy = d.y; }
+}
+function pinNodes(list) {
+  for (let i = 0; i < list.length; i++) pinNode(list[i]);
+}
+function isPinned(d) { return d.fx != null && d.fy != null; }
+
 const sim = d3.forceSimulation()
   .force('link', d3.forceLink().id(d => d.id).distance(100))
   .force('charge', d3.forceManyBody().strength(-200))
   .force('center', d3.forceCenter(W()/2, H()/2))
   .on('tick', () => {
+    // Auto-pin once the layout has cooled so subsequent filter/timeline updates
+    // re-introduce nodes at the same coordinates instead of re-exploding the graph.
+    if (!draggingNode && sim.alpha() < PIN_ALPHA) {
+      const ns = sim.nodes();
+      for (let i = 0; i < ns.length; i++) {
+        if (!isPinned(ns[i])) pinNode(ns[i]);
+      }
+    }
     if (renderMode === 'canvas') { drawCanvas(); return; }
     gLinks.selectAll('line')
       .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
       .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
     gNodes.selectAll('.node').attr('transform', d => `translate(${d.x},${d.y})`);
   });
+
+// Edge stroke width scales with how many packets have traversed the link so far
+// (mirrors node radius growth from packet history).
+const getEdgeWidth = e => Math.min(8, 1.2 + Math.sqrt(e.currentCount || 0) * 0.55);
+const getEdgeOpacity = e => Math.min(0.85, 0.28 + Math.sqrt(e.currentCount || 0) * 0.08);
 
 // ─── Graph Update ──────────────────────────────────────────────────────────────
 // Live captures can fire thousands of packets/sec; coalesce all of them into at
@@ -304,15 +339,29 @@ function drawCanvas() {
   const x0 = -view.x / view.k - m, y0 = -view.y / view.k - m;
   const x1 = (w - view.x) / view.k + m, y1 = (h - view.y) / view.k + m;
 
-  // Links — one batched path (all share #30363d @ 0.4), viewport-culled.
-  ctx.lineWidth = 1.5; ctx.globalAlpha = 0.4; ctx.strokeStyle = '#30363d';
-  ctx.beginPath();
+  // Links — colored/thickened by packet history (proto + currentCount). Grouped by
+  // stroke style so we still batch path() calls instead of one stroke per edge.
+  // Key = color|widthBucket so nearby widths share a path.
+  const edgeBatches = new Map();
   for (let i = 0; i < renderEdges.length; i++) {
     const e = renderEdges[i], sx = e.source.x, sy = e.source.y, tx = e.target.x, ty = e.target.y;
     if ((sx < x0 && tx < x0) || (sx > x1 && tx > x1) || (sy < y0 && ty < y0) || (sy > y1 && ty > y1)) continue;
-    ctx.moveTo(sx, sy); ctx.lineTo(tx, ty);
+    const color = colorScale(e.displayProto || e.proto || 'UNKNOWN');
+    const w = Math.round(getEdgeWidth(e) * 2) / 2; // 0.5px buckets
+    const key = color + '|' + w;
+    let b = edgeBatches.get(key);
+    if (!b) { b = { color, w, alpha: getEdgeOpacity(e), segs: [] }; edgeBatches.set(key, b); }
+    b.segs.push(sx, sy, tx, ty);
   }
-  ctx.stroke();
+  for (const b of edgeBatches.values()) {
+    ctx.lineWidth = b.w; ctx.globalAlpha = b.alpha; ctx.strokeStyle = b.color;
+    ctx.beginPath();
+    for (let i = 0; i < b.segs.length; i += 4) {
+      ctx.moveTo(b.segs[i], b.segs[i + 1]);
+      ctx.lineTo(b.segs[i + 2], b.segs[i + 3]);
+    }
+    ctx.stroke();
+  }
   ctx.globalAlpha = 1;
 
   // Nodes — cached glow sprite + core disc, viewport-culled. Collect on-screen nodes for
@@ -370,11 +419,24 @@ function setupCanvasInteraction() {
     // Returning null when no node is under the pointer makes d3-drag NOT start a gesture,
     // so the press falls through to the zoom behavior and pans the background instead.
     .subject(ev => nodeAt(ev.sourceEvent.clientX, ev.sourceEvent.clientY))
-    // d3-drag won't start a gesture when subject is null, but guard anyway so a stray event
-    // (or a subject removed mid-drag by a filter/timeline change) can never throw.
-    .on('start', ev => { if (!ev.active) sim.alphaTarget(0.3).restart(); if (ev.subject) { ev.subject.fx = ev.subject.x; ev.subject.fy = ev.subject.y; } })
-    .on('drag',  ev => { if (ev.subject) { const [gx, gy] = screenToGraph(ev.sourceEvent.clientX, ev.sourceEvent.clientY); ev.subject.fx = gx; ev.subject.fy = gy; } })
-    .on('end',   ev => { if (!ev.active) sim.alphaTarget(0); if (ev.subject) { ev.subject.fx = null; ev.subject.fy = null; } }));
+    // Drag only the subject: keep it pinned at the new position and do NOT reheat the
+    // whole simulation (that is what made 30k-node graphs thrash when one node moved).
+    .on('start', ev => {
+      if (!ev.subject) return;
+      draggingNode = ev.subject;
+      ev.subject.fx = ev.subject.x; ev.subject.fy = ev.subject.y;
+    })
+    .on('drag',  ev => {
+      if (!ev.subject) return;
+      const [gx, gy] = screenToGraph(ev.sourceEvent.clientX, ev.sourceEvent.clientY);
+      ev.subject.fx = gx; ev.subject.fy = gy;
+      ev.subject.x = gx;  ev.subject.y = gy;
+      drawCanvas();
+    })
+    .on('end',   ev => {
+      if (ev.subject) pinNode(ev.subject);
+      draggingNode = null;
+    }));
 }
 
 function setRenderMode(m) {
@@ -414,13 +476,29 @@ function updateGraph() {
       }
     }
   });
-  const activeEdges = [...edges.values()].filter(e => {
-    if (e.firstSeen > currentLimit) return false;
+  // Edges mirror nodes: each edge stores a packet history, and only packets at or
+  // before the timeline cursor count. Width/color/opacity then reflect that traversal.
+  const activeEdges = [];
+  edges.forEach(e => {
+    const hist = e.history;
+    if (!hist || !hist.length) return;
+    const splitIndex = bisectHistory(hist, currentLimit);
+    const prevCount = e.currentCount || 0;
+    e.currentCount = splitIndex;
+    if (splitIndex === 0) return;
+    e.justActivated = prevCount > 0 && splitIndex > prevCount;
+    e.displayProto = hist[splitIndex - 1].proto;
     const srcId = e.source.id !== undefined ? e.source.id : e.source;
     const dstId = e.target.id !== undefined ? e.target.id : e.target;
-    if (!activeNodeIds.has(srcId) || !activeNodeIds.has(dstId)) return false;
-    if (activeFilter && e.proto !== activeFilter) return false;
-    return true;
+    if (!activeNodeIds.has(srcId) || !activeNodeIds.has(dstId)) return;
+    if (activeFilter) {
+      let match = false;
+      for (let i = 0; i < splitIndex; i++) {
+        if (hist[i].proto === activeFilter) { match = true; break; }
+      }
+      if (!match) return;
+    }
+    activeEdges.push(e);
   });
 
   // Pick the render path from the FULL graph size (sticky — nodes.size only grows — so the
@@ -438,8 +516,14 @@ function updateGraph() {
 
   if (renderMode === 'svg') {
   const link = gLinks.selectAll('line').data(activeEdges, d => d.id);
-  link.enter().append('line').attr('class', 'link')
-    .style('opacity', 0).transition().duration(700).style('opacity', 0.4);
+  const linkEnter = link.enter().append('line').attr('class', 'link')
+    .attr('stroke', d => colorScale(d.displayProto || d.proto))
+    .attr('stroke-width', d => getEdgeWidth(d))
+    .style('opacity', 0);
+  linkEnter.transition().duration(500).style('opacity', d => getEdgeOpacity(d));
+  link.attr('stroke', d => colorScale(d.displayProto || d.proto))
+    .attr('stroke-width', d => getEdgeWidth(d))
+    .style('opacity', d => getEdgeOpacity(d));
   link.exit().remove();
   const node = gNodes.selectAll('.node').data(activeNodes, d => d.id);
   // Above this size, skip the per-node entrance/flash transitions — they'd spawn
@@ -447,9 +531,10 @@ function updateGraph() {
   const lite = activeNodes.length > 250;
   const ne = node.enter().append('g').attr('class', 'node')
     .call(d3.drag()
-      .on('start', (e, d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
-      .on('drag',  (e, d) => { d.fx = e.x; d.fy = e.y; })
-      .on('end',   (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
+      // Pin-on-drag only — never reheat the whole graph (that moved every node).
+      .on('start', (e, d) => { draggingNode = d; d.fx = d.x; d.fy = d.y; })
+      .on('drag',  (e, d) => { d.fx = e.x; d.fy = e.y; d.x = e.x; d.y = e.y; })
+      .on('end',   (e, d) => { pinNode(d); draggingNode = null; }));
 
   // Soft glow halo behind the body — a cheap gradient-filled disc (no SVG filter).
   ne.append('circle').attr('class', 'halo')
@@ -512,7 +597,20 @@ function updateGraph() {
 
   sim.nodes(activeNodes);
   sim.force('link').links(activeEdges);
-  if (sim.alpha() < 0.05) sim.alpha(0.05).restart();
+
+  // Only reheat the force sim when there are free (unpinned) nodes that still need
+  // placement. Filter toggles and timeline scrubs that re-show already-pinned nodes
+  // must not kick the whole graph into motion.
+  let freeCount = 0;
+  for (let i = 0; i < activeNodes.length; i++) {
+    if (!isPinned(activeNodes[i])) freeCount++;
+  }
+  if (freeCount > 0) {
+    if (sim.alpha() < 0.08) sim.alpha(Math.min(0.25, 0.05 + freeCount / Math.max(activeNodes.length, 1) * 0.2)).restart();
+  } else if (!draggingNode && sim.alpha() > 0) {
+    sim.alpha(0);
+  }
+
   document.getElementById('nc').textContent = activeNodes.length;
   document.getElementById('ec').textContent = activeEdges.length;
 
@@ -565,19 +663,113 @@ function processPacketData(rawSrc, rawDst, proto) {
   });
   const eid = `${src}-${dst}`;
   if (!edges.has(eid)) {
-    edges.set(eid, { id: eid, source: src, target: dst, firstSeen: globalPacketIndex, proto });
+    // Edge history is the packet-level traversal log (same shape as node history).
+    edges.set(eid, {
+      id: eid, source: src, target: dst,
+      history: [{ index: globalPacketIndex, proto }],
+      firstSeen: globalPacketIndex, proto,
+    });
+    structuralChange = true;
+  } else {
+    const e = edges.get(eid);
+    e.history.push({ index: globalPacketIndex, proto });
+    e.proto = proto;
     structuralChange = true;
   }
   return { structuralChange, legendChanged };
 }
 
-// ─── Timeline ──────────────────────────────────────────────────────────────────
+// ─── Timeline + Autoplay ───────────────────────────────────────────────────────
 const timeSlider = document.getElementById('timeSlider');
 const timeStatus = document.getElementById('timeStatus');
+const btnPlay = document.getElementById('btnPlay');
+let autoplayRaf = null;
+let autoplayLast = 0;
+let autoplayPos = 0; // fractional slider position for smooth multi-packet steps
+
+function setTimelineStatus(mode) {
+  if (mode === 'LIVE') {
+    timeStatus.textContent = 'LIVE';
+    timeStatus.style.color = '#3fb950';
+  } else if (mode === 'PLAY') {
+    timeStatus.textContent = 'PLAY';
+    timeStatus.style.color = '#58a6ff';
+  } else {
+    timeStatus.textContent = 'PAUSED';
+    timeStatus.style.color = '#d29922';
+  }
+}
+
+function stopAutoplay() {
+  if (autoplayRaf != null) {
+    cancelAnimationFrame(autoplayRaf);
+    autoplayRaf = null;
+  }
+  btnPlay.classList.remove('playing');
+  btnPlay.innerHTML = '&#9654;';
+  btnPlay.title = 'Autoplay timeline';
+  btnPlay.setAttribute('aria-label', 'Play timeline');
+}
+
+function startAutoplay() {
+  if (globalPacketIndex <= 0) return;
+  stopAutoplay();
+  isLive = false;
+  // If already at the end, restart from the beginning so Play always does something.
+  if (parseInt(timeSlider.value, 10) >= globalPacketIndex) {
+    timeSlider.value = 0;
+    autoplayPos = 0;
+    updateGraph();
+  } else {
+    autoplayPos = parseInt(timeSlider.value, 10);
+  }
+  btnPlay.classList.add('playing');
+  btnPlay.innerHTML = '&#10074;&#10074;';
+  btnPlay.title = 'Pause autoplay';
+  btnPlay.setAttribute('aria-label', 'Pause timeline');
+  setTimelineStatus('PLAY');
+  autoplayLast = performance.now();
+  // Full scrub in ~12s, clamped so tiny captures aren't instant and huge ones stay usable.
+  const rate = Math.min(8000, Math.max(40, globalPacketIndex / 12));
+  const tick = (now) => {
+    const dt = Math.min(0.1, (now - autoplayLast) / 1000);
+    autoplayLast = now;
+    autoplayPos = Math.min(globalPacketIndex, autoplayPos + rate * dt);
+    const v = Math.floor(autoplayPos);
+    if (parseInt(timeSlider.value, 10) !== v) {
+      timeSlider.value = v;
+      updateGraph();
+    }
+    if (autoplayPos >= globalPacketIndex) {
+      timeSlider.value = globalPacketIndex;
+      updateGraph();
+      stopAutoplay();
+      setTimelineStatus('PAUSED');
+      return;
+    }
+    autoplayRaf = requestAnimationFrame(tick);
+  };
+  autoplayRaf = requestAnimationFrame(tick);
+}
+
+function toggleAutoplay() {
+  if (autoplayRaf != null) {
+    stopAutoplay();
+    isLive = (parseInt(timeSlider.value, 10) === globalPacketIndex);
+    setTimelineStatus(isLive ? 'LIVE' : 'PAUSED');
+  } else {
+    startAutoplay();
+  }
+}
+
+btnPlay.addEventListener('click', toggleAutoplay);
+
 timeSlider.addEventListener('input', () => {
-  isLive = (parseInt(timeSlider.value) === globalPacketIndex);
-  timeStatus.textContent = isLive ? 'LIVE' : 'PAUSED';
-  timeStatus.style.color = isLive ? '#3fb950' : '#d29922';
+  // Manual scrub cancels autoplay so the user stays in control.
+  if (autoplayRaf != null) stopAutoplay();
+  autoplayPos = parseInt(timeSlider.value, 10);
+  isLive = (autoplayPos === globalPacketIndex);
+  setTimelineStatus(isLive ? 'LIVE' : 'PAUSED');
   updateGraph();
 });
 
@@ -586,6 +778,27 @@ function initUI() {
   document.getElementById('hud').style.display = 'block';
   document.getElementById('legend').style.display = 'block';
   document.getElementById('timeline').style.display = 'flex';
+}
+
+// Snapshot helpers used by the puppeteer harness / console debugging.
+function snapshotPositions() {
+  const out = {};
+  nodes.forEach((n, id) => {
+    if (n.x != null && n.y != null) out[id] = { x: n.x, y: n.y, fx: n.fx, fy: n.fy, pinned: isPinned(n) };
+  });
+  return out;
+}
+function positionDrift(before, after, excludeId) {
+  let max = 0, sum = 0, count = 0;
+  for (const id of Object.keys(before)) {
+    if (id === excludeId) continue;
+    const a = after[id];
+    if (!a) continue;
+    const d = Math.hypot(a.x - before[id].x, a.y - before[id].y);
+    max = Math.max(max, d);
+    sum += d; count++;
+  }
+  return { max, avg: count ? sum / count : 0, count };
 }
 
 // ─── Shared Protocol Tables ────────────────────────────────────────────────────
@@ -1128,7 +1341,13 @@ window.addEventListener('resize', () => {
   svg.attr('width', W()).attr('height', H());
   sizeCanvas();
   if (renderMode === 'canvas') drawCanvas();
-  sim.force('center', d3.forceCenter(W()/2, H()/2)).alpha(0.1).restart();
+  sim.force('center', d3.forceCenter(W()/2, H()/2));
+  // Only reheat if free nodes still need layout — never shove a fully-pinned graph.
+  const ns = sim.nodes();
+  let free = 0;
+  for (let i = 0; i < ns.length; i++) if (!isPinned(ns[i])) free++;
+  if (free > 0) sim.alpha(0.1).restart();
+  else if (renderMode === 'canvas') drawCanvas();
 });
 </script>
 </body>
