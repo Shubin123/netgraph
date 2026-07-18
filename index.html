@@ -337,19 +337,20 @@ function propagateDrag(dragged, dx, dy) {
 }
 
 const sim = d3.forceSimulation()
-  .force('link', d3.forceLink().id(d => d.id).distance(100))
-  .force('charge', d3.forceManyBody().strength(-300))
-  .force('center', d3.forceCenter(W()/2, H()/2))
-  .force('collide', d3.forceCollide().radius(d => getRadius(d) + 4).strength(1).iterations(2))
+  .force('link', d3.forceLink().id(d => d.id).distance(100).strength(0.6))
+  .force('center', d3.forceCenter(W()/2, H()/2).strength(0.15))
+  .force('collide', d3.forceCollide().radius(d => getRadius(d) + 6).strength(1).iterations(3))
   .on('tick', () => {
-    // Auto-pin once the layout has cooled so subsequent filter/timeline updates
-    // re-introduce nodes at the same coordinates instead of re-exploding the graph.
-    // Only auto-pin when locking is enabled.
+    // Auto-pin once the layout has cooled — only in Locked mode.
     if (lockState === 'locked' && !draggingNode && sim.alpha() < PIN_ALPHA) {
       const ns = sim.nodes();
       for (let i = 0; i < ns.length; i++) {
         if (!isPinned(ns[i])) pinNode(ns[i]);
       }
+    }
+    // FreeFlow / Unlocked: never let the sim fully stop.
+    if (lockState !== 'locked' && sim.alpha() < 0.015 && !draggingNode) {
+      sim.alpha(0.025).restart();
     }
     if (renderMode === 'canvas') { drawCanvas(); return; }
     gLinks.selectAll('line')
@@ -551,7 +552,7 @@ function setupCanvasInteraction() {
     })
     .on('end',   ev => {
       if (ev.subject) {
-        if (lockState !== 'unlocked') pinNode(ev.subject); else unpinNode(ev.subject);
+        if (lockState === 'locked') pinNode(ev.subject); else unpinNode(ev.subject);
       }
       draggingNode = null;
     }));
@@ -640,7 +641,7 @@ function updateGraph() {
     // angle (theta) with node count: small canvas graphs keep d3's accurate 0.9, but a 10k+
     // node graph needs ~1.8 to stay near 60fps — and at that zoom the coarser node spacing
     // is imperceptible. The SVG path (small graphs) keeps the pristine default untouched.
-    sim.force('charge').theta(nodes.size <= 2500 ? 0.9 : Math.min(2.0, 0.9 + (nodes.size - 2500) / 7500 * 0.9));
+    // No-op: charge force removed — disjoint trees stay independent.
   }
 
   if (renderMode === 'svg') {
@@ -663,7 +664,7 @@ function updateGraph() {
       // Pin-on-drag only — never reheat the whole graph (that moved every node).
       .on('start', (e, d) => { draggingNode = d; d.fx = d.x; d.fy = d.y; })
       .on('drag',  (e, d) => { const dx = e.x - d.x, dy = e.y - d.y; propagateDrag(d, dx, dy); d.fx = e.x; d.fy = e.y; d.x = e.x; d.y = e.y; })
-      .on('end',   (e, d) => { if (lockState !== 'unlocked') pinNode(d); else unpinNode(d); draggingNode = null; }));
+      .on('end',   (e, d) => { if (lockState === 'locked') pinNode(d); else unpinNode(d); draggingNode = null; }));
 
   // Soft glow halo behind the body — a cheap gradient-filled disc (no SVG filter).
   ne.append('circle').attr('class', 'halo')
@@ -743,9 +744,16 @@ function updateGraph() {
     if (!isPinned(activeNodes[i])) freeCount++;
   }
   if (freeCount > 0) {
-    if (sim.alpha() < 0.08) sim.alpha(Math.min(0.25, 0.05 + freeCount / Math.max(activeNodes.length, 1) * 0.2)).restart();
-  } else if (!draggingNode && sim.alpha() > 0) {
-    sim.alpha(0);
+    if (lockState === 'locked' && activeNodes.length > 10 && freeCount < activeNodes.length * 0.3) {
+      // A few new nodes in a mostly-pinned graph — pin them where they landed
+      // instead of reheating and moving everything.
+      for (let i = 0; i < activeNodes.length; i++) {
+        if (!isPinned(activeNodes[i])) pinNode(activeNodes[i]);
+      }
+    } else {
+      // Many unpinned (initial load, or non-locked modes): let the sim run.
+      if (sim.alpha() < 0.08) sim.alpha(Math.min(0.25, 0.05 + freeCount / Math.max(activeNodes.length, 1) * 0.2)).restart();
+    }
   }
 
   document.getElementById('nc').textContent = activeNodes.length;
@@ -925,33 +933,43 @@ function initUI() {
 }
 
 // --- Lock / Unlock / FreeFlow toggle (3-cycle) --------------------------------
-function toggleNodeLock() {
+function applyLockButton() {
   const btn = document.getElementById('btnLock');
-  // Cycle: locked → unlocked → freeflow → locked
   if (lockState === 'locked') {
-    // → Unlocked: no auto-pin, drag releases
-    lockState = 'unlocked';
-    unpinAllNodes();
-    sim.alpha(0.3).restart();
-    btn.innerHTML = '&#x1F513; Unlocked';
-    btn.style.background = '#8957e5';
-    btn.title = 'Nodes float freely, drag releases — click for FreeFlow';
-  } else if (lockState === 'unlocked') {
-    // → FreeFlow: no auto-pin, drag pins permanently (classic behaviour)
-    lockState = 'freeflow';
-    sim.alpha(0.3).restart();
-    btn.innerHTML = '&#x1F680; FreeFlow';
-    btn.style.background = '#d29922';
-    btn.title = 'Nodes float freely, drag pins them — click to Lock';
-  } else {
-    // → Locked: auto-pin after cooling, drag pins permanently
-    lockState = 'locked';
-    const ns = sim.nodes();
-    for (let i = 0; i < ns.length; i++) pinNode(ns[i]);
     btn.innerHTML = '&#x1F512; Locked';
     btn.style.background = '#30363d';
     btn.title = 'Nodes auto-pin after settling — click to Unlock';
+  } else if (lockState === 'unlocked') {
+    btn.innerHTML = '&#x1F513; Unlocked';
+    btn.style.background = '#8957e5';
+    btn.title = 'Nodes float freely, drag releases — click for FreeFlow';
+  } else {
+    btn.innerHTML = '&#x1F680; FreeFlow';
+    btn.style.background = '#d29922';
+    btn.title = 'Nodes float freely, drag pins them — click to Lock';
   }
+}
+
+function setLockState(state) {
+  lockState = state;
+  if (state === 'locked') {
+    const ns = sim.nodes();
+    for (let i = 0; i < ns.length; i++) pinNode(ns[i]);
+  } else if (state === 'unlocked') {
+    unpinAllNodes();
+    sim.alpha(0.3).restart();
+  } else {
+    // freeflow
+    sim.alpha(0.3).restart();
+  }
+  applyLockButton();
+}
+
+function toggleNodeLock() {
+  // Cycle: locked → unlocked → freeflow → locked
+  if (lockState === 'locked')          setLockState('unlocked');
+  else if (lockState === 'unlocked')   setLockState('freeflow');
+  else                                 setLockState('locked');
 }
 
 document.getElementById('btnLock').addEventListener('click', toggleNodeLock);
@@ -1278,36 +1296,43 @@ const SAMPLE_CAPTURES = [
   { name: 'randpkt-2020-09-06-16170.pcap',cat: 'Recent (2020)',     url: 'https://www.wireshark.org/download/automated/captures/randpkt-2020-09-06-16170.pcap' },
 ];
 const SAMPLE_CAPTURES_BASE = 'https://www.wireshark.org/download/automated/captures/';
+const pcapCache = new Map();  // URL → ArrayBuffer, so re-loading the same sample skips the download
 
 async function loadRemoteSample(url, name) {
   // Graph state is reset inside parsePCAPBuffer — just fetch and feed.
   try {
-    setProgress(5, `Downloading ${name}…`);
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    let arrayBuffer = await response.arrayBuffer();
-    setProgress(10, `Downloaded ${(arrayBuffer.byteLength / 1024).toFixed(1)} KB - parsing…`);
-
-    // Auto-decompress gzip-compressed captures
-    if (url.endsWith('.gz')) {
-      setProgress(12, `Decompressing gzip (${(arrayBuffer.byteLength / 1024).toFixed(1)} KB)…`);
-      const ds = new DecompressionStream('gzip');
-      const writer = ds.writable.getWriter();
-      const reader = ds.readable.getReader();
-      writer.write(arrayBuffer);
-      writer.close();
-      const chunks = [];
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        chunks.push(value);
+    let arrayBuffer;
+    if (pcapCache.has(url)) {
+      arrayBuffer = pcapCache.get(url);
+      setProgress(10, `Loaded ${name} from cache (${(arrayBuffer.byteLength / 1024).toFixed(1)} KB) — parsing…`);
+    } else {
+      setProgress(5, `Downloading ${name}…`);
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      arrayBuffer = await response.arrayBuffer();
+      setProgress(10, `Downloaded ${(arrayBuffer.byteLength / 1024).toFixed(1)} KB — parsing…`);
+      // Auto-decompress gzip-compressed captures before caching
+      if (url.endsWith('.gz')) {
+        setProgress(12, `Decompressing gzip (${(arrayBuffer.byteLength / 1024).toFixed(1)} KB)…`);
+        const ds = new DecompressionStream('gzip');
+        const writer = ds.writable.getWriter();
+        const reader = ds.readable.getReader();
+        writer.write(arrayBuffer);
+        writer.close();
+        const chunks = [];
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+        }
+        const totalLen = chunks.reduce((s, c) => s + c.byteLength, 0);
+        const merged = new Uint8Array(totalLen);
+        let off = 0;
+        for (const c of chunks) { merged.set(new Uint8Array(c.buffer, c.byteOffset, c.byteLength), off); off += c.byteLength; }
+        arrayBuffer = merged.buffer;
+        setProgress(15, `Decompressed to ${(arrayBuffer.byteLength / 1024).toFixed(1)} KB — parsing…`);
       }
-      const totalLen = chunks.reduce((s, c) => s + c.byteLength, 0);
-      const merged = new Uint8Array(totalLen);
-      let off = 0;
-      for (const c of chunks) { merged.set(new Uint8Array(c.buffer, c.byteOffset, c.byteLength), off); off += c.byteLength; }
-      arrayBuffer = merged.buffer;
-      setProgress(15, `Decompressed to ${(arrayBuffer.byteLength / 1024).toFixed(1)} KB - parsing…`);
+      pcapCache.set(url, arrayBuffer);  // cache the final (decompressed) result
     }
 
     await parsePCAPBuffer(arrayBuffer, { label: name });
