@@ -2,15 +2,17 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Live Network Map</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
 <style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { background: #0d1117; color: #e6edf3; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; height: 100vh; }
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+body { background: #0d1117; color: #e6edf3; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; height: 100vh; height: 100dvh; }
 
 #overlay {
   position: fixed; inset: 0; background: #0d1117;
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; z-index: 100;
+  overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 40px 16px;
 }
 #overlay h1 { font-size: 24px; color: #58a6ff; margin-bottom: 10px; }
 .btn-container { display: flex; flex-wrap: wrap; justify-content: center; gap: 15px; max-width: 900px; }
@@ -19,8 +21,10 @@ button {
   padding: 14px 32px; color: #fff; border: none;
   border-radius: 6px; font-size: 16px; cursor: pointer; font-weight: bold;
   transition: background 0.2s, transform 0.1s;
+  touch-action: manipulation; -webkit-touch-callout: none;
+  -webkit-user-select: none; user-select: none;
 }
-button:active { transform: scale(0.98); }
+button:active { transform: scale(0.97); }
 #btnPicker  { background: #238636; }
 #btnPicker:hover  { background: #2ea043; }
 #btnStatic  { background: #1f6feb; }
@@ -40,11 +44,26 @@ button:active { transform: scale(0.98); }
   appearance: none; -webkit-appearance: none;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%238b949e' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
   background-repeat: no-repeat; background-position: right 16px center; padding-right: 40px;
+  touch-action: manipulation; -webkit-touch-callout: none;
 }
 #sampleSelect:hover { border-color: #58a6ff; background: #1c2128; }
 #sampleSelect:focus  { outline: none; border-color: #8957e5; box-shadow: 0 0 0 2px rgba(137,87,229,0.3); }
 #sampleSelect option { background: #161b22; color: #e6edf3; font-weight: normal; }
 #sampleSelect optgroup { font-style: normal; font-weight: bold; color: #58a6ff; background: #161b22; }
+
+/* Mobile: tighter overlay layout on narrow screens */
+@media (max-width: 600px) {
+  #overlay { padding: 16px; gap: 12px; }
+  #overlay h1 { font-size: 20px; }
+  .btn-container { gap: 10px; }
+  button { padding: 12px 20px; font-size: 14px; width: 100%; max-width: 320px; }
+  #sampleSelect { width: 100%; max-width: 320px; min-width: 0; }
+  .hint-text { font-size: 11px; }
+  #legend { max-height: 50vh; font-size: 10px; top: 8px; right: 8px; padding: 8px; }
+  #hud { top: 8px; left: 8px; }
+  #stats { font-size: 11px; padding: 8px; }
+  #timeline { width: 94%; padding: 10px 14px; bottom: 10px; gap: 8px; }
+}
 
 #hud { position: fixed; top: 14px; left: 16px; z-index: 10; display: none; }
 #stats { font-size: 13px; color: #8b949e; background: rgba(13,17,23,0.85); padding: 12px; border-radius: 8px; border: 1px solid #30363d; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
@@ -89,7 +108,7 @@ button:active { transform: scale(0.98); }
 .legend-item:hover { color: #e6edf3; }
 .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
 
-#cv { position: fixed; inset: 0; z-index: 1; display: none; }
+#cv { position: fixed; inset: 0; z-index: 1; display: none; touch-action: none; }
 .link { stroke-width: 1.5; opacity: 0.55; }
 .node circle.core { stroke-width: 1.5; cursor: grab; }
 .node circle.ping, .node circle.halo { pointer-events: none; }
@@ -113,6 +132,7 @@ button:active { transform: scale(0.98); }
   <select id="sampleSelect">
     <option value="" disabled selected>&#x1F4E6; Load Example PCAP&#x2026;</option>
   </select>
+  <input type="file" id="fallbackFileInput" style="display:none" />
 </div>
 
 <div id="hud">
@@ -1159,8 +1179,11 @@ async function loadRemoteSample(url, name) {
     await parsePCAPBuffer(arrayBuffer, { label: name });
   } catch (err) {
     document.getElementById('progress-bar-wrap').style.display = 'none';
+    // CORS or network error — open in a new tab so the browser downloads the file.
+    // Then the user can load it via the local file-picker button.
+    window.open(url, '_blank');
     if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError') || err.name === 'TypeError') {
-      alert('Could not download "' + name + '".\n\nThe remote server may block cross-origin requests when running from a local file.\nTry hosting the app on a web server, or download the file manually from:\n' + url);
+      alert('"' + name + '" is downloading in a new tab.\n\nOnce downloaded, use "Parse PCAP / PCAPNG" to load it.');
     } else {
       alert('Failed to load "' + name + '": ' + err.message);
     }
@@ -1394,25 +1417,49 @@ async function disconnectSerial() {
   setSerialStatus('');
 }
 
+// ─── Cross-browser file picker (Chromium FSA + Safari/Firefox fallback) ──────
+// showOpenFilePicker is Chromium-only; iOS Safari and Firefox need an <input> fallback.
+function pickFile(acceptExts, mimeOverride) {
+  if (window.showOpenFilePicker) {
+    const types = [];
+    if (acceptExts) {
+      const desc = mimeOverride ? 'Capture Files' : (acceptExts[0] === '.csv' ? 'CSV Files' : 'Data Files');
+      const accept = {};
+      accept[mimeOverride || (acceptExts[0] === '.csv' ? 'text/csv' : 'application/octet-stream')] = acceptExts;
+      types.push({ description: desc, accept });
+    }
+    return window.showOpenFilePicker(types.length ? { types } : {});
+  }
+  // Fallback for Safari / Firefox / iOS
+  return new Promise((resolve, reject) => {
+    const input = document.getElementById('fallbackFileInput');
+    input.accept = acceptExts ? acceptExts.join(',') : '';
+    input.onchange = () => {
+      const file = input.files[0];
+      if (file) resolve([{ getFile: async () => file }]);
+      else reject(new Error('No file selected'));
+    };
+    // If the user cancels, onchange never fires — but we can detect via window focus
+    const onFocus = () => { window.removeEventListener('focus', onFocus); setTimeout(() => { if (!input.files.length) reject(new Error('Cancelled')); }, 300); };
+    window.addEventListener('focus', onFocus);
+    input.click();
+  });
+}
+
 // ─── Button Handlers ───────────────────────────────────────────────────────────
 document.getElementById('btnPicker').onclick = async () => {
-  try { 
-    [fileHandle] = await window.showOpenFilePicker(); 
-    initUI(); 
+  try {
+    [fileHandle] = await pickFile();
+    initUI();
     await loadOUIDatabase();
-    streamLoop(); 
+    streamLoop();
   } catch(e){}
 };
 
 document.getElementById('btnPcap').onclick = async () => {
   try {
-    [fileHandle] = await window.showOpenFilePicker({ 
-      types: [{
-        description: 'Capture Files',
-        accept: { 'application/vnd.tcpdump.pcap': ['.pcap', '.cap', '.pcapng'] }
-      }] 
-    });
-    initUI(); 
+    [fileHandle] = await pickFile(['.pcap', '.cap', '.pcapng'], 'application/vnd.tcpdump.pcap');
+    initUI();
     await loadOUIDatabase();
     processStaticPCAP();
   } catch(e) {}
@@ -1420,8 +1467,8 @@ document.getElementById('btnPcap').onclick = async () => {
 
 document.getElementById('btnStatic').onclick = async () => {
   try {
-    [fileHandle] = await window.showOpenFilePicker({ types:[{description:'CSV Files',accept:{'text/csv':['.csv']}}] });
-    initUI(); 
+    [fileHandle] = await pickFile(['.csv'], 'text/csv');
+    initUI();
     await loadOUIDatabase();
     processStaticCSV();
   } catch(e){}
