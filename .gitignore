@@ -1,3 +1,4 @@
 /perf/node_modules
 *.pcap
 !/perf/80211-fixture.pcap
+!/perf/wpa-induction.pcap

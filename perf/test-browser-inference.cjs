@@ -168,6 +168,37 @@ function run() {
   assert.ok(sampleObs.every(obs => obs.rate !== null), 'radiotap rate expected');
   assert.ok(sampleObs.every(obs => obs.mcs !== null), 'radiotap MCS expected');
   console.log(`  fixture: ${fixtureResult.sessions.length} sessions, ${fixtureResult.windows.length} windows, ${clients.size} clients, ${fixtureResult.diagnostics.dropped_retries} retries deduped`);
+
+  // Real-world Wireshark sample: wpa-Induction.pcap from the Wireshark wiki
+  // (radiotap, WPA-encrypted data, real client traffic patterns).
+  const wpaPath = resolve(dirname(__filename), 'wpa-induction.pcap');
+  if (existsSync(wpaPath)) {
+    const wpaBuf = readFileSync(wpaPath);
+    const wpaAB = wpaBuf.buffer.slice(wpaBuf.byteOffset, wpaBuf.byteOffset + wpaBuf.byteLength);
+    const wpaModel = {
+      kind: 'field-logistic-baseline-v1', schema_version: '80211-metadata-v1',
+      feature_columns: [...inference.columns], window_size: 32, labels: ['web', 'voip'], classes: [0, 1],
+      coefficients: [Array(72).fill(0)], intercepts: [1], is_binary: true,
+      preprocessing: { min_frames: 8, stride: 16, require_protected: true, deduplicate_retries: true, idle_timeout_seconds: 15 },
+    };
+    const wpaResult = inference.infer(wpaAB, wpaModel, '00:0c:41:82:b2:55', 'wpa-induction');
+    assert.equal(validate(wpaResult), wpaResult);
+    assert.equal(wpaResult.status, 'ok');
+    assert.ok(wpaResult.sessions.length >= 1, `expected ≥1 session, got ${wpaResult.sessions.length}`);
+    assert.ok(wpaResult.windows.length >= 3, `expected ≥3 windows, got ${wpaResult.windows.length}`);
+    assert.ok(wpaResult.diagnostics.dropped_retries >= 1, 'expected retry dedup in real capture');
+    const wpaObs = [];
+    inference.packets(wpaAB, (view, start, length, original, linkType, timestamp) => {
+      if (wpaObs.length < 5) {
+        const obs = inference.observation(view, start, length, timestamp, linkType);
+        if (obs) wpaObs.push(obs);
+      }
+    });
+    assert.ok(wpaObs.every(obs => obs.rate !== null), 'radiotap rate expected in real capture');
+    const wpaEntries = graphEntries(wpaResult);
+    assert.ok(wpaEntries.has('00:0c:41:82:b2:55'), 'AP entry expected');
+    console.log(`  wpa-induction: ${wpaResult.sessions.length} sessions, ${wpaResult.windows.length} windows, ${wpaResult.diagnostics.dropped_retries} retries deduped`);
+  }
   console.log('Browser inference tests passed.');
 }
 
