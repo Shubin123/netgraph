@@ -116,6 +116,58 @@ function run() {
   assert.throws(() => inference.validateModel({ ...model(), preprocessing: { min_frames: 5 } }), /preprocessing/);
   const multiclass = inference.validateModel({ ...model(), is_binary: false, labels: ['first', 'second', 'third'], classes: [0, 1, 2], coefficients: Array.from({ length: 3 }, () => Array(72).fill(0)), intercepts: [1000, 1001, 1002] });
   assert.equal(inference.predict(multiclass, Array(72).fill(0)).prediction, 'third');
+
+  // Multi-client radiotap fixture: exercises signal/rate/MCS parsing, session
+  // splitting, retry dedup, and graph entry generation across several clients.
+  const { readFileSync, existsSync } = require('node:fs');
+  const { resolve, dirname } = require('node:path');
+  const { graphEntries } = require('../classification.js');
+  const fixturePath = resolve(dirname(__filename), '80211-fixture.pcap');
+  if (!existsSync(fixturePath)) {
+    require('node:child_process').execSync(`node ${resolve(dirname(__filename), 'gen-80211-pcap.cjs')}`, { stdio: 'inherit' });
+  }
+  const fixtureBuf = readFileSync(fixturePath);
+  const fixtureAB = fixtureBuf.buffer.slice(fixtureBuf.byteOffset, fixtureBuf.byteOffset + fixtureBuf.byteLength);
+  const fixtureModel = {
+    kind: 'field-logistic-baseline-v1', schema_version: '80211-metadata-v1',
+    feature_columns: [...inference.columns], window_size: 16, labels: ['streaming', 'browsing', 'voip'], classes: [0, 1, 2],
+    coefficients: Array.from({ length: 3 }, (_, i) => Array.from({ length: 72 }, (_, j) => Math.sin(i * 7 + j * 3) * 0.1)),
+    intercepts: [0.5, -0.2, 0.1], is_binary: false,
+    preprocessing: { min_frames: 8, stride: 8, require_protected: true, deduplicate_retries: true, idle_timeout_seconds: 15 },
+  };
+  const fixtureResult = inference.infer(fixtureAB, fixtureModel, '02:00:00:00:00:01', '80211-fixture');
+  assert.equal(validate(fixtureResult), fixtureResult);
+  assert.equal(fixtureResult.status, 'ok');
+  assert.ok(fixtureResult.sessions.length >= 10, `expected ≥10 sessions, got ${fixtureResult.sessions.length}`);
+  assert.ok(fixtureResult.windows.length >= 30, `expected ≥30 windows, got ${fixtureResult.windows.length}`);
+  assert.ok(fixtureResult.diagnostics.dropped_retries > 0, 'expected retry dedup');
+  const clients = new Set(fixtureResult.sessions.map(s => s.client_mac));
+  assert.ok(clients.size >= 5, `expected ≥5 clients, got ${clients.size}`);
+  const multiSession = [...clients].some(mac => fixtureResult.sessions.filter(s => s.client_mac === mac).length > 1);
+  assert.ok(multiSession, 'expected at least one client with multiple sessions (idle gap)');
+  const hasInsufficient = fixtureResult.sessions.some(s => s.status === 'insufficient_data');
+  assert.ok(hasInsufficient, 'expected at least one insufficient_data session');
+  const entries = graphEntries(fixtureResult);
+  assert.ok(entries.size >= 7, `expected ≥7 graph entries (AP + clients), got ${entries.size}`);
+  const ap = entries.get('02:00:00:00:00:01');
+  assert.ok(ap && ap.role === 'ap');
+  for (const [mac, entry] of entries) {
+    if (entry.role === 'client') {
+      assert.ok(entry.label.length > 0);
+      assert.ok(entry.description.includes(mac));
+    }
+  }
+  const sampleObs = [];
+  inference.packets(fixtureAB, (view, start, length, original, linkType, timestamp) => {
+    if (sampleObs.length < 5) {
+      const obs = inference.observation(view, start, length, timestamp, linkType);
+      if (obs) sampleObs.push(obs);
+    }
+  });
+  assert.ok(sampleObs.every(obs => obs.signal !== null), 'radiotap signal expected');
+  assert.ok(sampleObs.every(obs => obs.rate !== null), 'radiotap rate expected');
+  assert.ok(sampleObs.every(obs => obs.mcs !== null), 'radiotap MCS expected');
+  console.log(`  fixture: ${fixtureResult.sessions.length} sessions, ${fixtureResult.windows.length} windows, ${clients.size} clients, ${fixtureResult.diagnostics.dropped_retries} retries deduped`);
   console.log('Browser inference tests passed.');
 }
 
