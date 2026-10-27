@@ -1402,6 +1402,8 @@ const SAMPLE_CAPTURES = [
   { name: 'fuzz-2011-08-06-32654.pcap',   cat: 'Fuzz (2010-2011)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2011-08-06-32654.pcap' },
   { name: 'fuzz-2011-10-26-27718.pcap',   cat: 'Fuzz (2010-2011)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2011-10-26-27718.pcap' },
   { name: 'randpkt-2020-09-06-16170.pcap',cat: 'Recent (2020)',     url: 'https://www.wireshark.org/download/automated/captures/randpkt-2020-09-06-16170.pcap' },
+  { name: 'wpa-induction.pcap',           cat: '802.11 classifier', url: 'perf/wpa-induction.pcap', bssid: '00:0c:41:82:b2:55' },
+  { name: '80211-fixture.pcap',           cat: '802.11 classifier', url: 'perf/80211-fixture.pcap', bssid: '02:00:00:00:00:01' },
 ];
 const SAMPLE_CAPTURES_BASE = 'https://www.wireshark.org/download/automated/captures/';
 const pcapCache = new Map();  // URL → ArrayBuffer, so re-loading the same sample skips the download
@@ -1931,7 +1933,9 @@ document.getElementById('classification-close').onclick = () => {
     const url = sel.value;
     if (!url) return;
     const name = sel.selectedOptions[0].textContent;
+    const sample = SAMPLE_CAPTURES.find(s => s.url === url);
     sel.value = ''; // reset to placeholder
+    if (sample?.bssid) document.getElementById('inference-bssid').value = sample.bssid;
     initUI();
     await loadOUIDatabase();
     await loadRemoteSample(url, name);
