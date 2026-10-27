@@ -1,0 +1,24 @@
+{
+  "description": "Demo field logistic baseline for the bundled monitor-mode samples. Hand-set weights on one feature: mean payload length of protected data frames per window (<300 B small, 300-1000 B mixed, >1000 B bulk). Labels describe frame sizes, not applications.",
+  "kind": "field-logistic-baseline-v1",
+  "schema_version": "80211-metadata-v1",
+  "feature_columns": ["direction", "mpdu_len", "payload_len", "iat_ms", "log_iat", "is_retry", "seq_delta", "qos_tid", "has_qos", "is_protected", "subtype", "duration", "signal_dbm", "signal_missing", "data_rate", "rate_missing", "mcs_index", "mcs_missing"],
+  "window_size": 16,
+  "labels": ["small frames", "mixed frames", "bulk frames"],
+  "classes": [0, 1, 2],
+  "is_binary": false,
+  "coefficients": [
+    [0, 0, -0.02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0.02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  ],
+  "intercepts": [6, 0, -20],
+  "unknown_threshold": 0.6,
+  "preprocessing": {
+    "require_protected": true,
+    "deduplicate_retries": true,
+    "min_frames": 8,
+    "stride": 8,
+    "idle_timeout_seconds": 15
+  }
+}

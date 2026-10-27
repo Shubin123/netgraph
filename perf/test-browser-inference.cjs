@@ -117,89 +117,89 @@ function run() {
   const multiclass = inference.validateModel({ ...model(), is_binary: false, labels: ['first', 'second', 'third'], classes: [0, 1, 2], coefficients: Array.from({ length: 3 }, () => Array(72).fill(0)), intercepts: [1000, 1001, 1002] });
   assert.equal(inference.predict(multiclass, Array(72).fill(0)).prediction, 'third');
 
-  // Multi-client radiotap fixture: exercises signal/rate/MCS parsing, session
-  // splitting, retry dedup, and graph entry generation across several clients.
-  const { readFileSync, existsSync } = require('node:fs');
-  const { resolve, dirname } = require('node:path');
+  // Monitor-mode samples from the example menu, scored with the bundled demo model.
+  // Only protected ToDS/FromDS data frames may drive inference.
+  const { readFileSync } = require('node:fs');
+  const { resolve } = require('node:path');
   const { graphEntries } = require('../classification.js');
-  const fixturePath = resolve(dirname(__filename), '80211-fixture.pcap');
-  if (!existsSync(fixturePath)) {
-    require('node:child_process').execSync(`node ${resolve(dirname(__filename), 'gen-80211-pcap.cjs')}`, { stdio: 'inherit' });
-  }
-  const fixtureBuf = readFileSync(fixturePath);
-  const fixtureAB = fixtureBuf.buffer.slice(fixtureBuf.byteOffset, fixtureBuf.byteOffset + fixtureBuf.byteLength);
-  const fixtureModel = {
-    kind: 'field-logistic-baseline-v1', schema_version: '80211-metadata-v1',
-    feature_columns: [...inference.columns], window_size: 16, labels: ['streaming', 'browsing', 'voip'], classes: [0, 1, 2],
-    coefficients: Array.from({ length: 3 }, (_, i) => Array.from({ length: 72 }, (_, j) => Math.sin(i * 7 + j * 3) * 0.1)),
-    intercepts: [0.5, -0.2, 0.1], is_binary: false,
-    preprocessing: { min_frames: 8, stride: 8, require_protected: true, deduplicate_retries: true, idle_timeout_seconds: 15 },
-  };
-  const fixtureResult = inference.infer(fixtureAB, fixtureModel, '02:00:00:00:00:01', '80211-fixture');
-  assert.equal(validate(fixtureResult), fixtureResult);
-  assert.equal(fixtureResult.status, 'ok');
-  assert.ok(fixtureResult.sessions.length >= 10, `expected ≥10 sessions, got ${fixtureResult.sessions.length}`);
-  assert.ok(fixtureResult.windows.length >= 30, `expected ≥30 windows, got ${fixtureResult.windows.length}`);
-  assert.ok(fixtureResult.diagnostics.dropped_retries > 0, 'expected retry dedup');
-  const clients = new Set(fixtureResult.sessions.map(s => s.client_mac));
-  assert.ok(clients.size >= 5, `expected ≥5 clients, got ${clients.size}`);
-  const multiSession = [...clients].some(mac => fixtureResult.sessions.filter(s => s.client_mac === mac).length > 1);
-  assert.ok(multiSession, 'expected at least one client with multiple sessions (idle gap)');
-  const hasInsufficient = fixtureResult.sessions.some(s => s.status === 'insufficient_data');
-  assert.ok(hasInsufficient, 'expected at least one insufficient_data session');
-  const entries = graphEntries(fixtureResult);
-  assert.ok(entries.size >= 7, `expected ≥7 graph entries (AP + clients), got ${entries.size}`);
-  const ap = entries.get('02:00:00:00:00:01');
-  assert.ok(ap && ap.role === 'ap');
-  for (const [mac, entry] of entries) {
-    if (entry.role === 'client') {
-      assert.ok(entry.label.length > 0);
-      assert.ok(entry.description.includes(mac));
-    }
-  }
-  const sampleObs = [];
-  inference.packets(fixtureAB, (view, start, length, original, linkType, timestamp) => {
-    if (sampleObs.length < 5) {
-      const obs = inference.observation(view, start, length, timestamp, linkType);
-      if (obs) sampleObs.push(obs);
-    }
-  });
-  assert.ok(sampleObs.every(obs => obs.signal !== null), 'radiotap signal expected');
-  assert.ok(sampleObs.every(obs => obs.rate !== null), 'radiotap rate expected');
-  assert.ok(sampleObs.every(obs => obs.mcs !== null), 'radiotap MCS expected');
-  console.log(`  fixture: ${fixtureResult.sessions.length} sessions, ${fixtureResult.windows.length} windows, ${clients.size} clients, ${fixtureResult.diagnostics.dropped_retries} retries deduped`);
+  const demoModel = JSON.parse(readFileSync(resolve(__dirname, 'demo-frame-size-model.json'), 'utf8'));
+  assert.deepEqual(demoModel.feature_columns, inference.columns);
 
-  // Real-world Wireshark sample: wpa-Induction.pcap from the Wireshark wiki
-  // (radiotap, WPA-encrypted data, real client traffic patterns).
-  const wpaPath = resolve(dirname(__filename), 'wpa-induction.pcap');
-  if (existsSync(wpaPath)) {
-    const wpaBuf = readFileSync(wpaPath);
-    const wpaAB = wpaBuf.buffer.slice(wpaBuf.byteOffset, wpaBuf.byteOffset + wpaBuf.byteLength);
-    const wpaModel = {
-      kind: 'field-logistic-baseline-v1', schema_version: '80211-metadata-v1',
-      feature_columns: [...inference.columns], window_size: 32, labels: ['web', 'voip'], classes: [0, 1],
-      coefficients: [Array(72).fill(0)], intercepts: [1], is_binary: true,
-      preprocessing: { min_frames: 8, stride: 16, require_protected: true, deduplicate_retries: true, idle_timeout_seconds: 15 },
-    };
-    const wpaResult = inference.infer(wpaAB, wpaModel, '00:0c:41:82:b2:55', 'wpa-induction');
-    assert.equal(validate(wpaResult), wpaResult);
-    assert.equal(wpaResult.status, 'ok');
-    assert.ok(wpaResult.sessions.length >= 1, `expected ≥1 session, got ${wpaResult.sessions.length}`);
-    assert.ok(wpaResult.windows.length >= 3, `expected ≥3 windows, got ${wpaResult.windows.length}`);
-    assert.ok(wpaResult.diagnostics.dropped_retries >= 1, 'expected retry dedup in real capture');
-    const wpaObs = [];
-    inference.packets(wpaAB, (view, start, length, original, linkType, timestamp) => {
-      if (wpaObs.length < 5) {
-        const obs = inference.observation(view, start, length, timestamp, linkType);
-        if (obs) wpaObs.push(obs);
-      }
-    });
-    assert.ok(wpaObs.every(obs => obs.rate !== null), 'radiotap rate expected in real capture');
-    const wpaEntries = graphEntries(wpaResult);
-    assert.ok(wpaEntries.has('00:0c:41:82:b2:55'), 'AP entry expected');
-    console.log(`  wpa-induction: ${wpaResult.sessions.length} sessions, ${wpaResult.windows.length} windows, ${wpaResult.diagnostics.dropped_retries} retries deduped`);
+  function monitorSample(name, bssid) {
+    const buffer = readFileSync(resolve(__dirname, name));
+    const census = frameCensus(buffer, bssid);
+    const result = inference.infer(arrayBuffer(buffer), demoModel, bssid, name);
+    assert.equal(validate(result), result);
+    assert.equal(result.status, 'ok');
+    assert.ok(census.management > 0, `${name}: expected management frames alongside data`);
+    assert.ok(census.data > census.scored, `${name}: expected unscored data frames (null/unprotected/multicast)`);
+    const usedFrames = result.sessions.reduce((sum, session) => sum + session.frames, 0) + result.diagnostics.dropped_retries;
+    assert.equal(usedFrames, census.scored, `${name}: inference must use exactly the protected unicast data frames`);
+    const dataOnly = inference.infer(arrayBuffer(census.dataOnly), demoModel, bssid, name);
+    assert.deepEqual(dataOnly.sessions, result.sessions, `${name}: non-data frames changed sessions`);
+    assert.deepEqual(dataOnly.windows, result.windows, `${name}: non-data frames changed windows`);
+    console.log(`  ${name}: ${census.total} frames (${census.management} mgmt, ${census.control} ctrl, ${census.data} data) → ${census.scored} scored data frames → ${result.sessions.length} sessions, ${result.windows.length} windows`);
+    return result;
   }
+
+  const fixture = monitorSample('80211-fixture.pcap', '02:00:00:00:00:01');
+  assert.ok(fixture.diagnostics.dropped_retries > 0, 'expected retry dedup');
+  const clients = new Set(fixture.sessions.map(s => s.client_mac));
+  assert.equal(clients.size, 6);
+  assert.ok([...clients].some(mac => fixture.sessions.filter(s => s.client_mac === mac).length > 1), 'expected an idle-gap session split');
+  assert.ok(fixture.sessions.some(s => s.status === 'insufficient_data'));
+  const windowLabels = mac => new Set(fixture.windows.filter(w => w.client_mac === mac).map(w => w.prediction));
+  assert.deepEqual(windowLabels('02:00:00:00:00:10'), new Set(['small frames']));
+  assert.deepEqual(windowLabels('02:00:00:00:00:11'), new Set(['mixed frames']));
+  assert.deepEqual(windowLabels('02:00:00:00:00:14'), new Set(['bulk frames']));
+  const entries = graphEntries(fixture);
+  assert.equal(entries.get('02:00:00:00:00:01').label, 'AP · 6 clients');
+  assert.match(entries.get('02:00:00:00:00:14').label, /^bulk frames · /);
+  const observations = [];
+  inference.packets(arrayBuffer(readFileSync(resolve(__dirname, '80211-fixture.pcap'))), (view, start, length, original, linkType, timestamp) => {
+    const observation = inference.observation(view, start, length, timestamp, linkType);
+    if (observation) observations.push(observation);
+  });
+  assert.ok(observations.every(o => o.signal !== null && o.rate !== null && o.mcs !== null), 'radiotap signal/rate/MCS expected');
+
+  const wpa = monitorSample('wpa-induction.pcap', '00:0c:41:82:b2:55');
+  assert.ok(wpa.diagnostics.dropped_retries >= 1, 'expected retry dedup in real capture');
+  assert.ok(graphEntries(wpa).has('00:0c:41:82:b2:55'));
   console.log('Browser inference tests passed.');
+}
+
+// Classic-PCAP 802.11 census: frame counts by type, the number of data frames the
+// classifier should score for `bssid`, and a copy holding only data-type frames.
+function frameCensus(buffer, bssid) {
+  const magic = buffer.readUInt32LE(0);
+  const little = magic === 0xa1b2c3d4 || magic === 0xa1b23c4d;
+  const read32 = offset => little ? buffer.readUInt32LE(offset) : buffer.readUInt32BE(offset);
+  const linkType = read32(20) & 0xffff;
+  const census = { total: 0, management: 0, control: 0, data: 0, scored: 0 };
+  const kept = [buffer.subarray(0, 24)];
+  const mac = at => [...buffer.subarray(at, at + 6)].map(b => b.toString(16).padStart(2, '0')).join(':');
+  for (let offset = 24; offset + 16 <= buffer.length;) {
+    const length = read32(offset + 8);
+    const start = offset + 16;
+    const next = start + length;
+    const frame = linkType === 127 ? start + buffer.readUInt16LE(start + 2) : start;
+    census.total++;
+    const fc = buffer[frame], flags = buffer[frame + 1], type = (fc >> 2) & 3, subtype = fc >> 4, ds = flags & 3;
+    if (type === 0) census.management++;
+    else if (type === 1) census.control++;
+    else if (type === 2) {
+      census.data++;
+      kept.push(buffer.subarray(offset, next));
+      const qos = subtype >= 8;
+      if ([0, 1, 2, 3, 8, 9, 10, 11].includes(subtype) && (ds === 1 || ds === 2) && (flags & 0x40)
+        && length === read32(offset + 12) && next - frame >= 24 + (qos ? 2 : 0)) {
+        const client = mac(frame + (ds === 1 ? 10 : 4));
+        if (mac(frame + (ds === 1 ? 4 : 10)) === bssid && !(parseInt(client.slice(0, 2), 16) & 1) && client !== bssid) census.scored++;
+      }
+    }
+    offset = next;
+  }
+  return { ...census, dataOnly: Buffer.concat(kept) };
 }
 
 module.exports = { model, frame, pcap, pcapng, arrayBuffer };

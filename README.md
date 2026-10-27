@@ -37,6 +37,15 @@ scoping, protected-frame filtering, retry deduplication, idle sessions, sliding
 windows, 18-feature aggregation and logistic prediction all run locally in
 JavaScript. No capture uploads or Python inference service are used.
 
+**Load Example PCAP** separates monitor-mode captures (raw 802.11/radiotap frames)
+from Ethernet/IP ones. Selecting a monitor-mode example (`perf/wpa-induction.pcap`
+from the Wireshark wiki, or the synthetic `perf/80211-fixture.pcap`) fills in its AP
+BSSID and immediately classifies its protected ToDS/FromDS data frames, badging the
+client and AP nodes. Beacons, probes, ACKs, null-data and unprotected EAPOL frames are
+drawn but never scored. These examples use `perf/demo-frame-size-model.json`, a
+hand-weighted demo on mean data-frame payload size: its labels (small/mixed/bulk
+frames) describe frame sizes, not applications. Choose a Model JSON to override it.
+
 Use an existing 802.class `models/active_model.json`, or export a **trusted**
 trained field baseline with the Python environment used by 802.class:
 

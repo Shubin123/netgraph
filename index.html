@@ -175,6 +175,7 @@ button:active { transform: scale(0.97); }
   <p>Local field logistic baseline. Classify the current monitor capture or choose another file. No uploads or Python inference service.</p>
   <p><label>Model JSON <input id="inference-model" type="file" accept=".json,application/json"></label></p>
   <p id="inference-current-capture">No monitor capture loaded in the graph.</p>
+  <p id="inference-sample-model" hidden></p>
   <p><label>Capture override (optional) <input id="inference-capture" type="file" accept=".pcap,.cap,.pcapng"></label></p>
   <p><label>AP radio BSSID <input id="inference-bssid" placeholder="aa:bb:cc:dd:ee:ff" spellcheck="false"></label></p>
   <button id="inference-run">Run in browser</button>
@@ -1016,6 +1017,7 @@ function initUI() {
   currentGraphCapture = null;
   document.getElementById('inference-capture').value = '';
   document.getElementById('inference-current-capture').textContent = 'No monitor capture loaded in the graph.';
+  document.getElementById('inference-sample-model').hidden = true;
   document.getElementById('overlay').style.display = 'none';
   document.getElementById('hud').style.display = 'block';
   document.getElementById('legend').style.display = 'block';
@@ -1371,8 +1373,11 @@ async function parsePCAPBuffer(arrayBuffer, opts = {}) {
   timeStatus.textContent = isPcapng ? 'PCAPNG' : 'PCAP';
   timeStatus.style.color = '#8957e5';
   if (legend) updateLegend();
-  currentGraphCapture = { name: label, size: arrayBuffer.byteLength, arrayBuffer: async () => arrayBuffer.slice(0) };
+  currentGraphCapture = { name: label, size: arrayBuffer.byteLength, arrayBuffer: async () => arrayBuffer.slice(0), model: opts.model || null };
   document.getElementById('inference-current-capture').textContent = `Current graph capture: ${label}. Leave the override empty to classify this capture.`;
+  const sampleModel = document.getElementById('inference-sample-model');
+  sampleModel.hidden = !opts.model;
+  sampleModel.textContent = opts.model ? `Sample model: ${opts.model.name} (demo labels describe data-frame sizes, not applications). Choose a Model JSON to override.` : '';
   if (!opts.inferenceResult) document.getElementById('inference-capture').value = '';
   if (opts.inferenceResult) attachGraphInference(opts.inferenceResult);
   updateGraph();
@@ -1391,24 +1396,28 @@ async function processStaticPCAP() {
 }
 
 // --- Remote Sample PCAP Registry + Fetch ------------------------------------
+// Monitor-mode samples carry an AP BSSID and model, so selecting one classifies its
+// protected 802.11 data frames and badges the client/AP nodes.
+const MONITOR_MODE = 'Monitor mode · raw 802.11 data frames (auto-classified)';
+const DEMO_MODEL = 'perf/demo-frame-size-model.json';
 const SAMPLE_CAPTURES = [
-  { name: 'fuzz-2006-07-05-6279.pcap',    cat: 'Fuzz (2006-2009)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2006-07-05-6279.pcap' },
-  { name: 'fuzz-2006-08-26-27284.pcap',   cat: 'Fuzz (2006-2009)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2006-08-26-27284.pcap' },
-  { name: 'fuzz-2007-03-14-28690.pcap',   cat: 'Fuzz (2006-2009)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2007-03-14-28690.pcap' },
-  { name: 'fuzz-2008-12-18-30921.pcap',   cat: 'Fuzz (2006-2009)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2008-12-18-30921.pcap' },
-  { name: 'fuzz-2009-08-11-31213.pcap',   cat: 'Fuzz (2006-2009)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2009-08-11-31213.pcap' },
-  { name: 'fuzz-2010-06-28-29484.pcap',   cat: 'Fuzz (2010-2011)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2010-06-28-29484.pcap' },
-  { name: 'fuzz-2010-11-14-23230.pcap',   cat: 'Fuzz (2010-2011)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2010-11-14-23230.pcap' },
-  { name: 'fuzz-2011-08-06-32654.pcap',   cat: 'Fuzz (2010-2011)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2011-08-06-32654.pcap' },
-  { name: 'fuzz-2011-10-26-27718.pcap',   cat: 'Fuzz (2010-2011)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2011-10-26-27718.pcap' },
-  { name: 'randpkt-2020-09-06-16170.pcap',cat: 'Recent (2020)',     url: 'https://www.wireshark.org/download/automated/captures/randpkt-2020-09-06-16170.pcap' },
-  { name: 'wpa-induction.pcap',           cat: '802.11 classifier', url: 'perf/wpa-induction.pcap', bssid: '00:0c:41:82:b2:55' },
-  { name: '80211-fixture.pcap',           cat: '802.11 classifier', url: 'perf/80211-fixture.pcap', bssid: '02:00:00:00:00:01' },
+  { name: 'wpa-induction.pcap',           cat: MONITOR_MODE, url: 'perf/wpa-induction.pcap', bssid: '00:0c:41:82:b2:55', model: DEMO_MODEL },
+  { name: '80211-fixture.pcap',           cat: MONITOR_MODE, url: 'perf/80211-fixture.pcap', bssid: '02:00:00:00:00:01', model: DEMO_MODEL },
+  { name: 'fuzz-2006-07-05-6279.pcap',    cat: 'Ethernet / IP · Fuzz (2006-2009)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2006-07-05-6279.pcap' },
+  { name: 'fuzz-2006-08-26-27284.pcap',   cat: 'Ethernet / IP · Fuzz (2006-2009)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2006-08-26-27284.pcap' },
+  { name: 'fuzz-2007-03-14-28690.pcap',   cat: 'Ethernet / IP · Fuzz (2006-2009)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2007-03-14-28690.pcap' },
+  { name: 'fuzz-2008-12-18-30921.pcap',   cat: 'Ethernet / IP · Fuzz (2006-2009)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2008-12-18-30921.pcap' },
+  { name: 'fuzz-2009-08-11-31213.pcap',   cat: 'Ethernet / IP · Fuzz (2006-2009)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2009-08-11-31213.pcap' },
+  { name: 'fuzz-2010-06-28-29484.pcap',   cat: 'Ethernet / IP · Fuzz (2010-2011)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2010-06-28-29484.pcap' },
+  { name: 'fuzz-2010-11-14-23230.pcap',   cat: 'Ethernet / IP · Fuzz (2010-2011)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2010-11-14-23230.pcap' },
+  { name: 'fuzz-2011-08-06-32654.pcap',   cat: 'Ethernet / IP · Fuzz (2010-2011)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2011-08-06-32654.pcap' },
+  { name: 'fuzz-2011-10-26-27718.pcap',   cat: 'Ethernet / IP · Fuzz (2010-2011)', url: 'https://www.wireshark.org/download/automated/captures/fuzz-2011-10-26-27718.pcap' },
+  { name: 'randpkt-2020-09-06-16170.pcap',cat: 'Ethernet / IP · Recent (2020)',     url: 'https://www.wireshark.org/download/automated/captures/randpkt-2020-09-06-16170.pcap' },
 ];
 const SAMPLE_CAPTURES_BASE = 'https://www.wireshark.org/download/automated/captures/';
 const pcapCache = new Map();  // URL → ArrayBuffer, so re-loading the same sample skips the download
 
-async function loadRemoteSample(url, name) {
+async function loadRemoteSample(url, name, sample = {}) {
   // Graph state is reset inside parsePCAPBuffer — just fetch and feed.
   try {
     let arrayBuffer;
@@ -1445,7 +1454,13 @@ async function loadRemoteSample(url, name) {
       pcapCache.set(url, arrayBuffer);  // cache the final (decompressed) result
     }
 
-    await parsePCAPBuffer(arrayBuffer, { label: name });
+    let model = null;
+    if (sample.model) {
+      const response = await fetch(sample.model);
+      if (!response.ok) throw new Error(`Sample model HTTP ${response.status}`);
+      model = new File([await response.text()], sample.model.split('/').pop(), { type: 'application/json' });
+    }
+    await parsePCAPBuffer(arrayBuffer, { label: name, model });
   } catch (err) {
     document.getElementById('progress-bar-wrap').style.display = 'none';
     // Trigger a real file download via hidden <a> — works for direct file URLs.
@@ -1841,7 +1856,7 @@ document.getElementById('inference-run').onclick = async () => {
   document.getElementById('inference-download').hidden = true;
   document.getElementById('classification-list').replaceChildren();
   try {
-    const modelFile = document.getElementById('inference-model').files[0];
+    const modelFile = document.getElementById('inference-model').files[0] || currentGraphCapture?.model;
     const capture = document.getElementById('inference-capture').files[0] || currentGraphCapture;
     const bssid = document.getElementById('inference-bssid').value;
     if (!modelFile || !capture) throw new Error('Select a field baseline model JSON and load a monitor capture into the graph or choose a capture override.');
@@ -1873,7 +1888,7 @@ document.getElementById('inference-run').onclick = async () => {
     const graphBuffer = await capture.arrayBuffer();
     if (generation !== inferenceGeneration) return;
     initUI();
-    await parsePCAPBuffer(graphBuffer, { label: capture.name, infrastructure: true, inferenceResult: result });
+    await parsePCAPBuffer(graphBuffer, { label: capture.name, infrastructure: true, inferenceResult: result, model: capture.model });
     document.getElementById('classification').hidden = true;
   } catch (error) {
     if (generation === inferenceGeneration) status.textContent = `Inference failed: ${error.message}`;
@@ -1938,7 +1953,8 @@ document.getElementById('classification-close').onclick = () => {
     if (sample?.bssid) document.getElementById('inference-bssid').value = sample.bssid;
     initUI();
     await loadOUIDatabase();
-    await loadRemoteSample(url, name);
+    await loadRemoteSample(url, name, sample);
+    if (sample?.model && currentGraphCapture?.model) document.getElementById('inference-run').click();
   });
 })();
 

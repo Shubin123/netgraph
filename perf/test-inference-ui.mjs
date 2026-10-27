@@ -156,7 +156,43 @@ try {
   assert.equal(await page.$$eval('.inference-label', elements => elements.length), 0);
   assert.equal(await page.evaluate(() => [...nodes.values()].some(node => node.inference)), false);
   assert.deepEqual(errors, []);
-  console.log('Browser worker/UI tests passed: current-capture inference, graph badges, SVG/canvas/keyboard selection, inspector, vendor names, capture reset, safe labels, cancellation, invalid model.');
+
+  // Example menu: monitor-mode samples are grouped apart from Ethernet/IP ones and
+  // classify their 802.11 data frames on selection, badging client and AP nodes.
+  const sample = await browser.newPage();
+  const sampleErrors = [];
+  sample.on('pageerror', error => sampleErrors.push(error.message));
+  sample.on('dialog', dialog => { sampleErrors.push(`dialog: ${dialog.message()}`); dialog.dismiss(); });
+  await sample.goto(`http://127.0.0.1:${server.address().port}`, { waitUntil: 'load' });
+  await sample.waitForFunction(() => typeof window.d3 !== 'undefined');
+  const groups = await sample.$$eval('#sampleSelect optgroup', elements => elements.map(element => ({ label: element.label, options: [...element.children].map(option => option.value) })));
+  assert.match(groups[0].label, /^Monitor mode · raw 802\.11 data frames/);
+  assert.deepEqual(groups[0].options, ['perf/wpa-induction.pcap', 'perf/80211-fixture.pcap']);
+  assert.ok(groups.slice(1).length && groups.slice(1).every(group => group.label.startsWith('Ethernet / IP')));
+  await sample.select('#sampleSelect', 'perf/80211-fixture.pcap');
+  await sample.waitForFunction(() => latestInference?.pcap === '80211-fixture.pcap' && !document.getElementById('inference-run').disabled, { timeout: 60000 });
+  const classified = await sample.evaluate(() => ({
+    bssid: document.getElementById('inference-bssid').value,
+    sampleModel: document.getElementById('inference-sample-model').textContent,
+    panelHidden: document.getElementById('classification').hidden,
+    annotated: [...nodes.values()].filter(node => node.inference).map(node => node.inference.label),
+    badges: [...document.querySelectorAll('.inference-label')].map(element => element.textContent),
+    clientEdges: [...edges.values()].filter(edge => [edge.source, edge.target].some(end => (end.id ?? end) === '02:00:00:00:00:01')).length,
+  }));
+  assert.equal(classified.bssid, '02:00:00:00:00:01');
+  assert.match(classified.sampleModel, /demo-frame-size-model\.json/);
+  assert.equal(classified.panelHidden, true);
+  assert.equal(classified.annotated.length, 7);
+  assert.ok(classified.clientEdges >= 6, `expected client↔AP data edges, got ${classified.clientEdges}`);
+  for (const label of ['AP · 6 clients', 'small frames', 'mixed frames', 'bulk frames']) {
+    assert.ok(classified.badges.some(badge => badge.startsWith(label)), `missing badge ${label}: ${classified.badges.join(' | ')}`);
+  }
+  await sample.click('#hud .classifier-open');
+  await sample.click('#inference-run');
+  await sample.waitForFunction(() => latestInference?.pcap === '80211-fixture.pcap' && document.getElementById('classification').hidden, { timeout: 60000 });
+  assert.equal(await sample.$$eval('.inference-label', elements => elements.length), 7);
+  assert.deepEqual(sampleErrors, []);
+  console.log('Browser worker/UI tests passed: current-capture inference, graph badges, SVG/canvas/keyboard selection, inspector, vendor names, capture reset, safe labels, cancellation, invalid model, monitor-mode example auto-classification.');
 } finally {
   if (browser) await browser.close();
   await new Promise(resolve => server.close(resolve));
