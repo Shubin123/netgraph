@@ -39,6 +39,33 @@ const ClassificationResults = (() => {
     return result;
   }
 
+  function graphEntries(result) {
+    validate(result);
+    const entries = new Map();
+    for (const session of result.sessions) {
+      const mac = session.client_mac.toLowerCase();
+      const existing = entries.get(mac);
+      const count = (existing?.sessionCount || 0) + 1;
+      const latest = existing && Number.isFinite(existing.session.end_timestamp) && Number.isFinite(session.end_timestamp) && existing.session.end_timestamp > session.end_timestamp ? existing.session : session;
+      const prediction = latest.status === 'insufficient_data' ? 'insufficient_data' : latest.prediction;
+      const label = prediction === 'insufficient_data' ? 'Insufficient data' : prediction;
+      const confidence = latest.status === 'insufficient_data' ? '' : ` · ${(latest.confidence * 100).toFixed(1)}%`;
+      entries.set(mac, { role: 'client', mac, session: latest, sessionCount: count,
+        label: `${label}${confidence}`, color: prediction === 'insufficient_data' ? '#8b949e' : prediction === 'unknown' ? '#d29922' : '#3fb950',
+        description: `${mac} · Latest session: ${label}${confidence} · ${count} session(s). Capture-wide inference, independent of packet timeline.` });
+    }
+    const mac = result.bssid.toLowerCase();
+    const clients = entries.size;
+    entries.set(mac, { role: 'ap', mac, label: `AP · ${clients} client${clients === 1 ? '' : 's'}`, color: '#58a6ff',
+      description: `${mac} · Target AP radio BSSID · ${clients} observed client(s).` });
+    return entries;
+  }
+
+  function badge(entry) {
+    if (!entry) return '';
+    return entry.label.length > 42 ? `${entry.label.slice(0, 39)}…` : entry.label;
+  }
+
   function render(result, highlight) {
     const panel = document.getElementById('classification');
     const status = document.getElementById('classification-status');
@@ -78,7 +105,7 @@ const ClassificationResults = (() => {
     }
   }
 
-  return { validate, render };
+  return { validate, render, graphEntries, badge };
 })();
 
 if (typeof module !== 'undefined') module.exports = ClassificationResults;

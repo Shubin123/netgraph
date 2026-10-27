@@ -38,6 +38,12 @@ button:active { transform: scale(0.97); }
 #classification button { padding: 5px 8px; font-size: 12px; background: #30363d; margin: 4px; }
 #classification p { margin: 6px 0; }
 #classification-list { display: grid; gap: 6px; }
+#inference-view { position: fixed; left: 12px; bottom: 90px; z-index: 11; width: min(370px, calc(100vw - 24px)); padding: 12px; background: rgba(13,17,23,0.94); border: 1px solid #176b63; border-radius: 8px; font-size: 12px; max-height: 32vh; overflow: auto; }
+#inference-view p { margin: 7px 0; overflow-wrap: anywhere; }
+#inference-view button { padding: 5px 8px; margin: 3px; background: #30363d; font-size: 12px; }
+.node text.inference-label { font-weight: 600; paint-order: stroke; stroke: #0d1117; stroke-width: 3px; }
+.node:focus { outline: none; }
+.node:focus circle.core { stroke-width: 4px; }
 
 .hint-text { color: #8b949e; font-size: 13px; max-width: 720px; text-align: center; margin-top: 10px; line-height: 1.5; }
 
@@ -154,12 +160,22 @@ button:active { transform: scale(0.97); }
 </div>
 
 <div id="serialStatus"></div>
+<aside id="inference-view" aria-label="On-graph application inference" hidden>
+  <strong>802.class · on-graph inference</strong>
+  <p id="inference-view-summary"></p>
+  <p>Badges show each client's latest session, not the packet timeline. Select a node for details.</p>
+  <p id="inference-node-detail" role="status">Select an annotated AP or client.</p>
+  <button class="classifier-open">Model &amp; results</button>
+  <button id="inference-badges" aria-pressed="true">Hide badges</button>
+  <button id="inference-clear">Clear overlay</button>
+</aside>
 <section id="classification" aria-label="802.class inference results" hidden>
   <button id="classification-close" aria-label="Close inference results">Close</button>
   <strong>802.class · browser inference</strong>
-  <p>Local field logistic baseline. Select model JSON and a monitor capture; no uploads or Python inference service.</p>
+  <p>Local field logistic baseline. Classify the current monitor capture or choose another file. No uploads or Python inference service.</p>
   <p><label>Model JSON <input id="inference-model" type="file" accept=".json,application/json"></label></p>
-  <p><label>Monitor capture <input id="inference-capture" type="file" accept=".pcap,.cap,.pcapng"></label></p>
+  <p id="inference-current-capture">No monitor capture loaded in the graph.</p>
+  <p><label>Capture override (optional) <input id="inference-capture" type="file" accept=".pcap,.cap,.pcapng"></label></p>
   <p><label>AP radio BSSID <input id="inference-bssid" placeholder="aa:bb:cc:dd:ee:ff" spellcheck="false"></label></p>
   <button id="inference-run">Run in browser</button>
   <button id="inference-cancel" hidden>Cancel</button>
@@ -199,6 +215,9 @@ let isLive = true;
 let activeFilter = null;
 let hoveredNodeId = null;      // SVG hover highlight
 let canvasHoveredId = null;    // canvas hover highlight
+let graphInference = new Map();
+let inferenceBadgesVisible = true;
+let currentGraphCapture = null;
 
 // ─── OUI Resolution State ──────────────────────────────────────────────────────
 const ouiMap = new Map();
@@ -524,6 +543,10 @@ function drawCanvas() {
     ctx.beginPath(); ctx.arc(d.x, d.y, r, 0, 6.283185307179586);
     ctx.fillStyle = cs.fill; ctx.fill();
     ctx.lineWidth = 1.5; ctx.strokeStyle = cs.stroke; ctx.stroke();
+    if (d.inference && inferenceBadgesVisible) {
+      ctx.beginPath(); ctx.arc(d.x, d.y, r + 4, 0, Math.PI * 2);
+      ctx.lineWidth = 2; ctx.strokeStyle = d.inference.color; ctx.stroke();
+    }
     if (dimmed) ctx.globalAlpha = 1;
     if (wantLabels && !dimmed) labelBuf.push(d);
   }
@@ -532,7 +555,15 @@ function drawCanvas() {
   if (wantLabels && labelBuf.length <= 400) {
     ctx.fillStyle = '#8b949e'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.font = '10px system-ui, sans-serif';
-    for (let i = 0; i < labelBuf.length; i++) { const d = labelBuf[i]; ctx.fillText(d.id, d.x, d.y + getRadius(d) + 12); }
+    for (let i = 0; i < labelBuf.length; i++) {
+      const d = labelBuf[i];
+      ctx.fillStyle = '#8b949e';
+      ctx.fillText(d.id, d.x, d.y + getRadius(d) + 12);
+      if (d.inference && inferenceBadgesVisible) {
+        ctx.fillStyle = d.inference.color;
+        ctx.fillText(ClassificationResults.badge(d.inference), d.x, d.y + getRadius(d) + 27);
+      }
+    }
   }
   ctx.setTransform(1, 0, 0, 1, 0, 0);
 }
@@ -600,6 +631,11 @@ function setupCanvasInteraction() {
   canvasEl.addEventListener('mouseleave', () => {
     if (canvasHoveredId !== null) { canvasHoveredId = null; drawCanvas(); }
   });
+  canvasEl.addEventListener('click', event => {
+    if (event.defaultPrevented) return;
+    const node = nodeAt(event.clientX, event.clientY);
+    if (node) selectInferenceNode(node);
+  });
 }
 
 function setRenderMode(m) {
@@ -624,6 +660,7 @@ function updateGraph() {
   const activeNodes = [];
   const activeNodeIds = new Set();
   nodes.forEach(n => {
+    n.inference = graphInference.get(n.rawMac);
     const splitIndex = bisectHistory(n.history, currentLimit);
     const prevCount = n.currentCount || 0;
     n.currentCount = splitIndex;
@@ -764,6 +801,22 @@ function updateGraph() {
   }
 
   node.exit().remove();
+  const mergedNodes = ne.merge(node);
+  mergedNodes.selectAll('circle.inference-ring').data(d => d.inference && inferenceBadgesVisible ? [d] : [])
+    .join('circle').attr('class', 'inference-ring').attr('r', d => getRadius(d) + 4)
+    .attr('fill', 'none').attr('stroke', d => d.inference.color).attr('stroke-width', 2).attr('pointer-events', 'none');
+  mergedNodes.selectAll('text.inference-label').data(d => d.inference && inferenceBadgesVisible ? [d] : [])
+    .join('text').attr('class', 'inference-label').attr('text-anchor', 'middle')
+    .attr('dy', d => getRadius(d) + 28).style('fill', d => d.inference.color)
+    .text(d => ClassificationResults.badge(d.inference));
+  mergedNodes.select('text:not(.inference-label)').attr('dy', d => d.inference ? getRadius(d) + 13 : 22);
+  mergedNodes.selectAll('title').data(d => d.inference ? [d] : []).join('title').text(d => d.inference.description);
+  mergedNodes.attr('tabindex', d => d.inference ? 0 : null).attr('role', d => d.inference ? 'button' : null)
+    .attr('aria-label', d => d.inference ? d.inference.description : null)
+    .on('click.inference', (event, datum) => { if (!event.defaultPrevented) selectInferenceNode(datum); })
+    .on('keydown.inference', (event, datum) => {
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectInferenceNode(datum); }
+    });
   } // end SVG render path
 
   sim.nodes(activeNodes);
@@ -835,11 +888,11 @@ function processPacketData(rawSrc, rawDst, proto) {
   let structuralChange = false, legendChanged = false;
   globalPacketIndex++;
   if (!knownProtos.has(proto)) { knownProtos.add(proto); legendChanged = true; }
-  [src, dst].forEach(id => {
+  [src, dst].forEach((id, endpoint) => {
     if (!nodes.has(id)) {
       const peer = nodes.get(id === src ? dst : src);
       const pos = initialPosition(peer);
-      nodes.set(id, { id, history: [{ index: globalPacketIndex, proto }], x: pos.x, y: pos.y });
+      nodes.set(id, { id, rawMac: String(endpoint === 0 ? rawSrc : rawDst).toLowerCase(), history: [{ index: globalPacketIndex, proto }], x: pos.x, y: pos.y });
       structuralChange = true;
     } else {
       nodes.get(id).history.push({ index: globalPacketIndex, proto });
@@ -959,6 +1012,10 @@ timeSlider.addEventListener('input', () => {
 });
 
 function initUI() {
+  clearGraphInference(true);
+  currentGraphCapture = null;
+  document.getElementById('inference-capture').value = '';
+  document.getElementById('inference-current-capture').textContent = 'No monitor capture loaded in the graph.';
   document.getElementById('overlay').style.display = 'none';
   document.getElementById('hud').style.display = 'block';
   document.getElementById('legend').style.display = 'block';
@@ -1195,6 +1252,9 @@ function setProgress(pct, label) {
 
 // --- PCAP / PCAPNG File Parser (core - works with any ArrayBuffer) ---------------
 async function parsePCAPBuffer(arrayBuffer, opts = {}) {
+  clearGraphInference();
+  currentGraphCapture = null;
+  document.getElementById('inference-current-capture').textContent = 'No monitor capture loaded in the graph.';
   // Reset graph state for a clean load — every static file starts fresh.
   nodes.clear(); edges.clear(); knownProtos.clear(); resolvedMacs.clear();
   globalPacketIndex = 0; spawnIndex = 0;
@@ -1311,6 +1371,10 @@ async function parsePCAPBuffer(arrayBuffer, opts = {}) {
   timeStatus.textContent = isPcapng ? 'PCAPNG' : 'PCAP';
   timeStatus.style.color = '#8957e5';
   if (legend) updateLegend();
+  currentGraphCapture = { name: label, size: arrayBuffer.byteLength, arrayBuffer: async () => arrayBuffer.slice(0) };
+  document.getElementById('inference-current-capture').textContent = `Current graph capture: ${label}. Leave the override empty to classify this capture.`;
+  if (!opts.inferenceResult) document.getElementById('inference-capture').value = '';
+  if (opts.inferenceResult) attachGraphInference(opts.inferenceResult);
   updateGraph();
 }
 
@@ -1397,6 +1461,9 @@ async function loadRemoteSample(url, name) {
 
 // ─── Wireshark CSV Parser ──────────────────────────────────────────────────────
 async function processStaticCSV() {
+  clearGraphInference();
+  currentGraphCapture = null;
+  document.getElementById('inference-current-capture').textContent = 'CSV traffic cannot provide raw 802.11 metadata. Select a monitor capture.';
   // Reset for a clean load.
   nodes.clear(); edges.clear(); knownProtos.clear(); resolvedMacs.clear();
   globalPacketIndex = 0; spawnIndex = 0;
@@ -1689,6 +1756,7 @@ document.getElementById('btnSerial').onclick = connectWebSerial;
 function highlightInferenceMac(mac) {
   const id = getMacDisplayName(mac);
   if (!nodes.has(id)) return false;
+  selectInferenceNode(nodes.get(id));
   hoveredNodeId = id;
   canvasHoveredId = id;
   applyHighlight(id);
@@ -1700,11 +1768,51 @@ let inferenceWorker = null;
 let inferenceGeneration = 0;
 let latestInference = null;
 
-function showInferenceResult(result) {
+function clearGraphInference(redraw = false) {
+  graphInference = new Map();
+  inferenceBadgesVisible = true;
+  document.getElementById('inference-view').hidden = true;
+  document.getElementById('inference-node-detail').textContent = 'Select an annotated AP or client.';
+  const toggle = document.getElementById('inference-badges');
+  toggle.textContent = 'Hide badges';
+  toggle.setAttribute('aria-pressed', 'true');
+  if (redraw) updateGraph();
+}
+
+function attachGraphInference(result, imported = false) {
+  graphInference = ClassificationResults.graphEntries(result);
+  document.getElementById('inference-view').hidden = false;
+  document.getElementById('inference-view-summary').textContent = `${imported ? 'Imported overlay (verify matching capture) · ' : ''}${result.pcap || 'Capture'} · BSSID ${result.bssid} · ${result.model_kind} · ${graphInference.size - 1} clients · ${(result.windows || []).length} windows`;
+  document.getElementById('inference-node-detail').textContent = 'Select an annotated AP or client.';
+}
+
+function selectInferenceNode(node) {
+  const entry = graphInference.get(node.rawMac);
+  if (!entry) return;
+  const session = entry.session;
+  const details = session ? ` ${session.frames} usable frames in latest session; ${entry.sessionCount} session(s).${Number.isFinite(session.start_timestamp) ? ` Observation interval: ${session.start_timestamp}–${session.end_timestamp}.` : ''}` : '';
+  document.getElementById('inference-node-detail').textContent = entry.description + details;
+  document.getElementById('inference-view').hidden = false;
+}
+
+document.getElementById('inference-badges').onclick = () => {
+  inferenceBadgesVisible = !inferenceBadgesVisible;
+  const button = document.getElementById('inference-badges');
+  button.textContent = inferenceBadgesVisible ? 'Hide badges' : 'Show badges';
+  button.setAttribute('aria-pressed', String(inferenceBadgesVisible));
+  updateGraph();
+};
+document.getElementById('inference-clear').onclick = () => clearGraphInference(true);
+
+function showInferenceResult(result, attach = true) {
   ClassificationResults.validate(result);
   ClassificationResults.render(result, highlightInferenceMac);
   latestInference = result;
   document.getElementById('inference-download').hidden = false;
+  if (attach) {
+    attachGraphInference(result, true);
+    updateGraph();
+  }
 }
 
 document.querySelectorAll('.classifier-open').forEach(button => {
@@ -1732,9 +1840,9 @@ document.getElementById('inference-run').onclick = async () => {
   document.getElementById('classification-list').replaceChildren();
   try {
     const modelFile = document.getElementById('inference-model').files[0];
-    const capture = document.getElementById('inference-capture').files[0];
+    const capture = document.getElementById('inference-capture').files[0] || currentGraphCapture;
     const bssid = document.getElementById('inference-bssid').value;
-    if (!modelFile || !capture) throw new Error('Select a field baseline model JSON and monitor capture.');
+    if (!modelFile || !capture) throw new Error('Select a field baseline model JSON and load a monitor capture into the graph or choose a capture override.');
     if (modelFile.size > 5 * 1024 * 1024 || capture.size > 128 * 1024 * 1024) throw new Error('Maximum model size is 5 MiB; capture size is 128 MiB.');
     if (location.protocol === 'file:' && capture.size > 16 * 1024 * 1024) throw new Error('Serve this directory over HTTP for worker inference on captures over 16 MiB.');
     document.getElementById('inference-run').disabled = true;
@@ -1759,11 +1867,12 @@ document.getElementById('inference-run').onclick = async () => {
       inferenceWorker.postMessage({ buffer, model, bssid, name: capture.name }, [buffer]);
     });
     if (generation !== inferenceGeneration || !result) return;
-    showInferenceResult(result);
+    showInferenceResult(result, false);
     const graphBuffer = await capture.arrayBuffer();
     if (generation !== inferenceGeneration) return;
     initUI();
-    await parsePCAPBuffer(graphBuffer, { label: capture.name, infrastructure: true });
+    await parsePCAPBuffer(graphBuffer, { label: capture.name, infrastructure: true, inferenceResult: result });
+    document.getElementById('classification').hidden = true;
   } catch (error) {
     if (generation === inferenceGeneration) status.textContent = `Inference failed: ${error.message}`;
   } finally {

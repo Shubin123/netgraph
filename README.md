@@ -29,8 +29,10 @@ using puppeteer for auto testing
 ## 802.class integration
 
 Open **802.class browser inference** on the start screen or in the graph toolbar.
-Select a field logistic baseline model JSON, a raw 802.11/radiotap PCAP or PCAPNG,
-and the AP radio BSSID, then click **Run in browser**. Capture parsing, BSSID/DS-bit
+Select a field logistic baseline model JSON and the AP radio BSSID, then click
+**Run in browser** to classify the capture already loaded in the graph. An optional
+capture override accepts another raw 802.11/radiotap PCAP or PCAPNG.
+Capture parsing, BSSID/DS-bit
 scoping, protected-frame filtering, retry deduplication, idle sessions, sliding
 windows, 18-feature aggregation and logistic prediction all run locally in
 JavaScript. No capture uploads or Python inference service are used.
@@ -53,8 +55,19 @@ baselines are supported for browser execution, not PyTorch/joblib files, TCN or
 legacy checkpoints. The exporter loads pickle-based bundles: never use untrusted
 checkpoints. Python is needed only for this optional one-time export.
 
-The matching capture is visualized using AP/client infrastructure links. Expand
-sessions for window predictions, highlight clients/AP, and download result JSON.
+The matching capture is visualized using AP/client infrastructure links. Predictions
+appear directly beneath client nodes, with confidence and colored rings; the AP
+gets its own badge. SVG and canvas rendering both support these annotations.
+The setup panel closes after inference, leaving the graph and a compact inspector.
+Click a node (or focus it and press Enter in SVG mode) to inspect the latest
+session's classification, usable frames, and observation interval. Hide/show badges
+or clear the overlay without changing the captured traffic. Loading another capture
+clears the annotations to prevent stale predictions from following reused MACs.
+
+Use **Model & results** to expand sessions for window predictions, highlight
+clients/AP, and download result JSON. Node badges summarize the latest client
+session across the capture; they do not claim an app prediction at the timeline
+cursor. Older sessions remain available in the full results.
 Existing baseline/TCN result JSON can also be imported for review. Inference
 results are independent of packet timeline scrubbing. `unknown` follows the
 model's threshold; short sessions report `insufficient_data`. Missing radio values
