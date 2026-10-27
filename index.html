@@ -33,6 +33,11 @@ button:active { transform: scale(0.97); }
 #btnPcap:hover    { background: #9d6cfa; }
 #btnSerial  { background: #b08000; }
 #btnSerial:hover  { background: #d4a017; }
+.classifier-import, .classifier-open { background: #176b63; }
+#classification { position: fixed; left: 12px; bottom: 74px; z-index: 101; background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; max-width: min(520px, calc(100vw - 24px)); max-height: 40vh; overflow: auto; font-size: 12px; }
+#classification button { padding: 5px 8px; font-size: 12px; background: #30363d; margin: 4px; }
+#classification p { margin: 6px 0; }
+#classification-list { display: grid; gap: 6px; }
 
 .hint-text { color: #8b949e; font-size: 13px; max-width: 720px; text-align: center; margin-top: 10px; line-height: 1.5; }
 
@@ -126,6 +131,7 @@ button:active { transform: scale(0.97); }
     <button id="btnPcap">&#x1F988; Parse PCAP / PCAPNG</button>
     <button id="btnStatic">&#x1F4CA; Review Wireshark (CSV)</button>
     <button id="btnSerial">&#x1F4E1; ESP32 WebSerial (PCAPNG)</button>
+    <button class="classifier-open">802.class browser inference</button>
   </div>
   <p class="hint-text">
     Supports <b>.pcap / .cap / .pcapng</b> (native binary parsing with VLAN support), structured <b>.csv / .ndjson</b>, and live <b>ESP32 capture via WebSerial</b> (PCAPNG stream).<br>
@@ -143,10 +149,26 @@ button:active { transform: scale(0.97); }
     Edges: <b id="ec" style="color:#e6edf3">0</b> &nbsp;|&nbsp;
     Packets: <b id="pc" style="color:#e6edf3">0</b>
     <button id="btnLock" style="margin-left:10px;padding:4px 8px;font-size:12px;background:#30363d;border-radius:4px;" title="Toggle node locking">&#x1F512; Locked</button>
+    <button class="classifier-open" style="padding:4px 8px;font-size:12px;">802.class inference</button>
   </div>
 </div>
 
 <div id="serialStatus"></div>
+<section id="classification" aria-label="802.class inference results" hidden>
+  <button id="classification-close" aria-label="Close inference results">Close</button>
+  <strong>802.class · browser inference</strong>
+  <p>Local field logistic baseline. Select model JSON and a monitor capture; no uploads or Python inference service.</p>
+  <p><label>Model JSON <input id="inference-model" type="file" accept=".json,application/json"></label></p>
+  <p><label>Monitor capture <input id="inference-capture" type="file" accept=".pcap,.cap,.pcapng"></label></p>
+  <p><label>AP radio BSSID <input id="inference-bssid" placeholder="aa:bb:cc:dd:ee:ff" spellcheck="false"></label></p>
+  <button id="inference-run">Run in browser</button>
+  <button id="inference-cancel" hidden>Cancel</button>
+  <button class="classifier-import">Import existing results</button>
+  <button id="inference-download" hidden>Download results JSON</button>
+  <p id="classification-status" role="status"></p>
+  <p>Results are independent of the packet timeline. Not packet-level app identification or Wi-Fi decryption. Fixture/demo labels do not establish real-world app accuracy.</p>
+  <div id="classification-list"></div>
+</section>
 
 <div id="progress-bar-wrap">
   <div id="progress-label">Parsing PCAP&hellip;</div>
@@ -165,6 +187,8 @@ button:active { transform: scale(0.97); }
 <canvas id="cv"></canvas>
 <svg id="svg"></svg>
 
+<script src="./classification.js"></script>
+<script src="./browser-inference.js"></script>
 <script>
 // ─── Core State ───────────────────────────────────────────────────────────────
 const nodes = new Map();
@@ -1077,7 +1101,8 @@ function parseEthernetFrame(dv, pktStart, inclLen, linkType, totalBytes) {
       if (subtype === 8) proto = 'QoS-Data';
       else proto = `Data`;
     }
-    return { src, dst, proto };
+    const infrastructure = type === 2 && (dsBits === 1 || dsBits === 2);
+    return { src, dst, proto, bssid: infrastructure ? (dsBits === 1 ? a1 : a2) : null, client: infrastructure ? (dsBits === 1 ? a2 : a1) : null };
   }
 
   if (linkType === 1) {
@@ -1187,8 +1212,14 @@ async function parsePCAPBuffer(arrayBuffer, opts = {}) {
   let offset = 0;
   let le = true;
   let linkType = 1;
+  let captureInterfaces = [];
   let structural = false, legend = false, packetCount = 0;
   const CHUNK = 2500;
+  const ingest = packet => processPacketData(
+    opts.infrastructure && packet.client ? packet.client : packet.src,
+    opts.infrastructure && packet.bssid ? packet.bssid : packet.dst,
+    packet.proto,
+  );
 
   setProgress(0, isPcapng ? `Starting PCAPNG Parse (${label})…` : `Starting PCAP Parse (${label})…`);
 
@@ -1214,15 +1245,19 @@ async function parsePCAPBuffer(arrayBuffer, opts = {}) {
           const bom = dv.getUint32(offset + 8, true);
           le = (bom === 0x1A2B3C4D);
           blockLen = dv.getUint32(offset + 4, le); // Re-read length with correct endianness
+          captureInterfaces = [];
         } else if (blockType === 0x00000001) { // Interface Description Block
           linkType = dv.getUint16(offset + 8, le);
-        } else if (blockType === 0x00000006) { // Enhanced Packet Block
+          captureInterfaces.push(linkType);
+        } else if (blockType === 0x00000006 || blockType === 0x00000002) {
           const capLen2 = dv.getUint32(offset + 20, le);
           const pktOffset = offset + 28;
           if (pktOffset + capLen2 <= offset + blockLen) {
-            const r = parseEthernetFrame(dv, pktOffset, capLen2, linkType, total);
+            const interfaceId = blockType === 6 ? dv.getUint32(offset + 8, le) : dv.getUint16(offset + 8, le);
+            const interfaceLinkType = captureInterfaces[interfaceId];
+            const r = parseEthernetFrame(dv, pktOffset, capLen2, interfaceLinkType ?? linkType, total);
             if (r) {
-              const c = processPacketData(r.src, r.dst, r.proto);
+              const c = ingest(r);
               if (c.structuralChange) structural = true;
               if (c.legendChanged) legend = true;
             }
@@ -1235,7 +1270,7 @@ async function parsePCAPBuffer(arrayBuffer, opts = {}) {
           if (capLen > 0 && offset + 12 + capLen <= offset + blockLen) {
             const r = parseEthernetFrame(dv, offset + 12, capLen, linkType, total);
             if (r) {
-              const c = processPacketData(r.src, r.dst, r.proto);
+              const c = ingest(r);
               if (c.structuralChange) structural = true;
               if (c.legendChanged) legend = true;
             }
@@ -1257,7 +1292,7 @@ async function parsePCAPBuffer(arrayBuffer, opts = {}) {
 
         const r = parseEthernetFrame(dv, pktStart, inclLen, linkType, total);
         if (r) {
-          const c = processPacketData(r.src, r.dst, r.proto);
+          const c = ingest(r);
           if (c.structuralChange) structural = true;
           if (c.legendChanged) legend = true;
         }
@@ -1650,6 +1685,123 @@ document.getElementById('btnStatic').onclick = async () => {
 };
 
 document.getElementById('btnSerial').onclick = connectWebSerial;
+
+function highlightInferenceMac(mac) {
+  const id = getMacDisplayName(mac);
+  if (!nodes.has(id)) return false;
+  hoveredNodeId = id;
+  canvasHoveredId = id;
+  applyHighlight(id);
+  if (renderMode === 'canvas') drawCanvas();
+  return true;
+}
+
+let inferenceWorker = null;
+let inferenceGeneration = 0;
+let latestInference = null;
+
+function showInferenceResult(result) {
+  ClassificationResults.validate(result);
+  ClassificationResults.render(result, highlightInferenceMac);
+  latestInference = result;
+  document.getElementById('inference-download').hidden = false;
+}
+
+document.querySelectorAll('.classifier-open').forEach(button => {
+  button.onclick = () => { document.getElementById('classification').hidden = false; };
+});
+
+function finishInference() {
+  if (inferenceWorker) inferenceWorker.terminate();
+  inferenceWorker = null;
+  document.getElementById('inference-run').disabled = false;
+  document.getElementById('inference-cancel').hidden = true;
+}
+
+document.getElementById('inference-cancel').onclick = () => {
+  inferenceGeneration++;
+  finishInference();
+  document.getElementById('classification-status').textContent = 'Inference cancelled.';
+};
+
+document.getElementById('inference-run').onclick = async () => {
+  const status = document.getElementById('classification-status');
+  const generation = ++inferenceGeneration;
+  latestInference = null;
+  document.getElementById('inference-download').hidden = true;
+  document.getElementById('classification-list').replaceChildren();
+  try {
+    const modelFile = document.getElementById('inference-model').files[0];
+    const capture = document.getElementById('inference-capture').files[0];
+    const bssid = document.getElementById('inference-bssid').value;
+    if (!modelFile || !capture) throw new Error('Select a field baseline model JSON and monitor capture.');
+    if (modelFile.size > 5 * 1024 * 1024 || capture.size > 128 * 1024 * 1024) throw new Error('Maximum model size is 5 MiB; capture size is 128 MiB.');
+    if (location.protocol === 'file:' && capture.size > 16 * 1024 * 1024) throw new Error('Serve this directory over HTTP for worker inference on captures over 16 MiB.');
+    document.getElementById('inference-run').disabled = true;
+    document.getElementById('inference-cancel').hidden = false;
+    status.textContent = 'Reading model and capture…';
+    const model = BrowserInference.validateModel(JSON.parse(await modelFile.text()));
+    const buffer = await capture.arrayBuffer();
+    if (generation !== inferenceGeneration) return;
+    status.textContent = 'Classifying BSSID-scoped client windows locally…';
+    const result = await new Promise((resolve, reject) => {
+      if (location.protocol === 'file:') {
+        setTimeout(() => {
+          if (generation !== inferenceGeneration) { resolve(null); return; }
+          try { resolve(BrowserInference.infer(buffer, model, bssid, capture.name)); }
+          catch (error) { reject(error); }
+        }, 30);
+        return;
+      }
+      inferenceWorker = new Worker('./browser-inference.js');
+      inferenceWorker.onmessage = event => event.data.error ? reject(new Error(event.data.error)) : resolve(event.data.result);
+      inferenceWorker.onerror = () => reject(new Error('Inference worker failed. Check that browser-inference.js is served from this origin.'));
+      inferenceWorker.postMessage({ buffer, model, bssid, name: capture.name }, [buffer]);
+    });
+    if (generation !== inferenceGeneration || !result) return;
+    showInferenceResult(result);
+    const graphBuffer = await capture.arrayBuffer();
+    if (generation !== inferenceGeneration) return;
+    initUI();
+    await parsePCAPBuffer(graphBuffer, { label: capture.name, infrastructure: true });
+  } catch (error) {
+    if (generation === inferenceGeneration) status.textContent = `Inference failed: ${error.message}`;
+  } finally {
+    if (generation === inferenceGeneration) finishInference();
+  }
+};
+
+document.getElementById('inference-download').onclick = () => {
+  if (!latestInference) return;
+  const url = URL.createObjectURL(new Blob([JSON.stringify(latestInference, null, 2)], { type: 'application/json' }));
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = 'netgraph-inference.json';
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+
+document.querySelectorAll('.classifier-import').forEach(button => {
+  button.onclick = async () => {
+    try {
+      const [handle] = await pickFile(['.json'], 'application/json');
+      const file = await handle.getFile();
+      if (file.size > 20 * 1024 * 1024) throw new Error('Results file exceeds 20 MiB.');
+      const result = ClassificationResults.validate(JSON.parse(await file.text()));
+      showInferenceResult(result);
+    } catch (error) {
+      if (error.name === 'AbortError' || error.message === 'Cancelled') return;
+      document.getElementById('classification').hidden = false;
+      document.getElementById('classification-status').textContent = `Import failed: ${error.message}`;
+    }
+  };
+});
+document.getElementById('classification-close').onclick = () => {
+  document.getElementById('classification').hidden = true;
+  clearHighlight();
+  canvasHoveredId = null;
+  if (renderMode === 'canvas') drawCanvas();
+};
 
 // --- Populate and wire the sample PCAP dropdown ---
 (function populateSampleDropdown() {
